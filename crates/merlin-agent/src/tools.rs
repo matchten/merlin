@@ -241,7 +241,7 @@ fn obj(entries: &[(&str, Option<&Value>)]) -> Value {
 
 fn run_script(host: &mut dyn Host, a: &Value) -> R {
     let code = need_str(a, "code")?;
-    let r = host.command("script.run", json!({"code": code, "name": "agent"}))?;
+    let r = host.command("script.run", json!({"code": code, "name": "Merlin"}))?;
     // A script error is the model's to fix: flag it so providers mark the result as an error.
     let failed = r.get("error").is_some_and(|e| !e.is_null());
     let mut out = ToolOutput::json(r);

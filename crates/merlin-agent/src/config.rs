@@ -45,7 +45,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::OpenAi => "OPENAI_API_KEY",
             ProviderKind::Gemini => "GEMINI_API_KEY",
-            ProviderKind::Custom => "EFFECTCRAFT_AGENT_API_KEY",
+            ProviderKind::Custom => "MERLIN_API_KEY",
         }
     }
 

@@ -2,9 +2,9 @@
 //! calls as they stream, then saving the project and the frames the agent looked at.
 //!
 //! ```sh
-//! ANTHROPIC_API_KEY=… cargo run -p effectcraft-agent --example headless -- "a title that drops in with a bounce"
-//! cargo run -p effectcraft-agent --example headless -- --provider openai --model gpt-5 "…"
-//! cargo run -p effectcraft-agent --example headless -- --provider custom --base-url http://localhost:11434/v1 --model qwen3 "…"
+//! ANTHROPIC_API_KEY=… cargo run -p merlin-agent --example headless -- "a title that drops in with a bounce"
+//! cargo run -p merlin-agent --example headless -- --provider openai --model gpt-5 "…"
+//! cargo run -p merlin-agent --example headless -- --provider custom --base-url http://localhost:11434/v1 --model qwen3 "…"
 //! ```
 //!
 //! Output goes to `--out` (default `agent-out/`): `project.ecproj`, `frame-N.png`, `conversation.json`.
@@ -12,10 +12,10 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use effectcraft_agent::agent_loop::{AgentEvent, run_turn, turn_label};
-use effectcraft_agent::checkpoint::Checkpoint;
-use effectcraft_agent::conversation::Part;
-use effectcraft_agent::{AgentConfig, HeadlessHost, Host, ProviderKind, keys, providers, transport};
+use merlin_agent::agent_loop::{AgentEvent, run_turn, turn_label};
+use merlin_agent::checkpoint::Checkpoint;
+use merlin_agent::conversation::Part;
+use merlin_agent::{AgentConfig, HeadlessHost, Host, ProviderKind, keys, providers, transport};
 
 fn main() {
     if let Err(e) = run() {

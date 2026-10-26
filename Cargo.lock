@@ -1315,21 +1315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "effectcraft-agent"
-version = "0.17.0"
-dependencies = [
- "effectcraft-automation",
- "effectcraft-engine",
- "effectcraft-host",
- "keyring",
- "log",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "ureq",
-]
-
-[[package]]
 name = "effectcraft-automation"
 version = "0.17.0"
 dependencies = [
@@ -3443,6 +3428,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "merlin-agent"
+version = "0.17.0"
+dependencies = [
+ "effectcraft-automation",
+ "effectcraft-engine",
+ "effectcraft-host",
+ "keyring",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

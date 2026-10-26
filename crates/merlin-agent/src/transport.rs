@@ -116,7 +116,7 @@ mod http {
                 // stopped turn's thread rather than joining it.
                 .timeout_recv_body(Some(Duration::from_secs(1800)))
                 .http_status_as_error(false)
-                .user_agent(concat!("EffectCraft/", env!("CARGO_PKG_VERSION")))
+                .user_agent(concat!("Merlin/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .new_agent();
             Http { agent }

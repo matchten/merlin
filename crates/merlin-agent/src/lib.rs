@@ -1,6 +1,6 @@
-//! # effectcraft-agent (L5)
+//! # merlin-agent (L5)
 //!
-//! The in-app AI agent: a chat model that animates by writing After Effects-style JavaScript and
+//! Merlin, the in-app AI agent for EffectCraft: a chat model that animates by writing After Effects-style JavaScript and
 //! calling EffectCraft's engine commands, with every edit live and undoable.
 //!
 //! * [`provider`]: the [`LlmProvider`] interface over a normalized [`conversation`], with two

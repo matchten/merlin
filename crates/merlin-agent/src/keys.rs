@@ -9,7 +9,7 @@ use crate::config::ProviderKind;
 use crate::{Error, Result};
 
 /// Keychain service name.
-pub const SERVICE: &str = "EffectCraft Agent";
+pub const SERVICE: &str = "Merlin Agent";
 
 /// Where a provider's key comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

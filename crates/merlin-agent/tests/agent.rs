@@ -4,14 +4,14 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use effectcraft_agent::agent_loop::{AgentEvent, TurnEnd, run_turn};
-use effectcraft_agent::checkpoint::Checkpoint;
-use effectcraft_agent::conversation::{Image, Message, Native, Part, ResultPart, Role};
-use effectcraft_agent::provider::{ChatRequest, LlmProvider, StopReason};
-use effectcraft_agent::providers::anthropic::Anthropic;
-use effectcraft_agent::providers::openai_compat::OpenAiCompat;
-use effectcraft_agent::transport::Recorded;
-use effectcraft_agent::{AgentConfig, HeadlessHost, Host, ProviderKind, SYSTEM_PROMPT, tools};
+use merlin_agent::agent_loop::{AgentEvent, TurnEnd, run_turn};
+use merlin_agent::checkpoint::Checkpoint;
+use merlin_agent::conversation::{Image, Message, Native, Part, ResultPart, Role};
+use merlin_agent::provider::{ChatRequest, LlmProvider, StopReason};
+use merlin_agent::providers::anthropic::Anthropic;
+use merlin_agent::providers::openai_compat::OpenAiCompat;
+use merlin_agent::transport::Recorded;
+use merlin_agent::{AgentConfig, HeadlessHost, Host, ProviderKind, SYSTEM_PROMPT, tools};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------- stream builders
@@ -379,10 +379,10 @@ fn the_system_prompt_example_script_runs() {
 #[test]
 fn context_snapshot_describes_the_editor() {
     let mut h = host();
-    let s = effectcraft_agent::context::snapshot(&mut h);
+    let s = merlin_agent::context::snapshot(&mut h);
     assert!(s.contains("No composition is open"), "{s}");
     h.command("script.run", json!({"code": BUILD})).unwrap();
-    let s = effectcraft_agent::context::snapshot(&mut h);
+    let s = merlin_agent::context::snapshot(&mut h);
     assert!(s.contains("Active comp: \"Main\""), "{s}");
     assert!(s.contains("\"Title\""), "{s}");
 }

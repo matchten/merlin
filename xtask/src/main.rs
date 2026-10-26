@@ -59,7 +59,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("host", 4),
     ("ui-egui", 5),
     ("automation", 5),
-    ("agent", 5),
+    ("merlin-agent", 5),
     ("effectcraft", 6),
     ("cli", 6),
     ("web", 6),
@@ -85,7 +85,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("host", "engine"),
     ("script", "engine"),
     ("host", "script"),
-    ("agent", "automation"),
+    ("merlin-agent", "automation"),
     ("cli", "effectcraft"),
 ];
 
@@ -139,7 +139,8 @@ fn layers() -> Result<(), String> {
             if l < 5 && UI_ONLY.contains(&d.as_str()) {
                 errors.push(format!("{name} (L{l}) depends on UI/OS crate `{d}`"));
             }
-            if !d.starts_with("effectcraft-") {
+            // Workspace crates: upstream's plus this fork's Merlin crates.
+            if !d.starts_with("effectcraft-") && !d.starts_with("merlin-") {
                 continue;
             }
             let Some(dl) = layer_of(d) else { continue };
