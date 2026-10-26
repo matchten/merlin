@@ -1,0 +1,12 @@
+var comp = app.project.items.addComp("Agent Demo", 1920, 1080, 1, 5, 30);
+comp.openInViewer();
+var bg = comp.layers.addSolid([0.08, 0.09, 0.16], "Background", 1920, 1080, 1);
+var t = comp.layers.addText("Hello from an agent");
+var pos = t.property("ADBE Transform Group").property("ADBE Position");
+pos.setValueAtTime(0, [960, 1300]);
+pos.setValueAtTime(1, [960, 540]);
+var op = t.property("ADBE Transform Group").property("ADBE Opacity");
+op.setValueAtTime(0, 0);
+op.setValueAtTime(1, 100);
+t.property("ADBE Transform Group").property("ADBE Rotate Z").expression = "wiggle(2, 4)";
+"layers: " + comp.numLayers;
