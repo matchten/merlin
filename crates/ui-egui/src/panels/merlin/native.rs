@@ -13,6 +13,7 @@ use merlin_agent::agent_loop::{AgentEvent, TurnEnd, TurnOutcome, turn_label};
 use merlin_agent::attachment::{self, Attachment};
 use merlin_agent::checkpoint::Checkpoint;
 use merlin_agent::conversation::{Message, Part};
+use merlin_agent::guard::{self, Scope};
 use merlin_agent::keys::{self, KeySource};
 use merlin_agent::notes::{self as note_model, Note, NoteBrief, NoteStatus};
 use merlin_agent::{AgentConfig, ProviderKind, RemoteHost, TurnContext, providers, run_turn_with, transport};
@@ -61,6 +62,8 @@ struct Worker {
     stopping_since: Option<f64>,
     tool_calls: usize,
     status: Option<String>,
+    /// The limits the message's locked pins set (each edit outside them is refused).
+    scope: Option<Scope>,
 }
 
 /// What the panel keeps outside its serialized state.
@@ -106,6 +109,11 @@ pub(crate) struct Runtime {
     pub(super) mark_drag: Option<egui::Pos2>,
     /// A note just added, whose text field takes the focus once.
     pub(super) focus_note: Option<u64>,
+    /// The highlighted entry of the `@` list, and the `@` it was dismissed at (Escape).
+    pub(super) mention_sel: usize,
+    pub(super) mention_off: Option<usize>,
+    /// The pin chips' height last frame (they wrap in a narrow panel).
+    pub(super) pins_h: f32,
 }
 
 impl Clone for Runtime {
@@ -264,8 +272,11 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let briefs = note_briefs(app);
     let note_ids: Vec<u64> = briefs.iter().filter(|b| b.send).map(|b| b.note.id).collect();
     let time = app.session.active_comp_id().map(|c| agent_time(app, c.0, app.session.time()));
-    let turn_ctx = TurnContext { time, notes: briefs };
+    let (pins, scope) = super::mentions::briefs(app);
+    let turn_ctx = TurnContext { time, notes: briefs, pins };
     let panel = &mut app.ui.merlin;
+    let pin_labels: Vec<String> = std::mem::take(&mut panel.pins).into_iter().map(|p| if p.locked { format!("🔒 {}", p.label) } else { p.label }).collect();
+    panel.rt.mention_off = None;
     for n in panel.notes.iter_mut().filter(|n| note_ids.contains(&n.id)) {
         n.status = NoteStatus::Sent;
     }
@@ -293,7 +304,7 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     } else {
         sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
     };
-    panel.items.push(ChatItem::User { text, attachments: sent.into_iter().map(|a| a.path).collect(), notes: note_ids });
+    panel.items.push(ChatItem::User { text, attachments: sent.into_iter().map(|a| a.path).collect(), notes: note_ids, pins: pin_labels });
     let rt = &mut panel.rt;
     rt.next_turn = rt.next_turn.saturating_add(1);
     let turn = rt.next_turn;
@@ -343,7 +354,7 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     });
     match spawned {
         Ok(_) => {
-            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None });
+            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None, scope });
             panel.busy = true;
         }
         Err(e) => notice(app, tr_args("Merlin couldn't start: {}", &[&e]), true),
@@ -412,6 +423,8 @@ pub fn attach_paths(app: &mut EffectcraftApp, ctx: &egui::Context, paths: Vec<St
 /// * `note`: `{time, end?, text, layers?, region?}` (comp seconds, layer ids, `[x, y, w, h]` comp
 ///   pixels) adds a note on the active comp, the selected layers unless `layers` is given;
 /// * `removeNote`: a note id;
+/// * `pin`: `{layer | frame | range | note, locked?}` (layer id, comp seconds, `[s, s]`, note id)
+///   pins the next message, as an `@` mention does;
 /// * `applyNotes`: `true` sends the typed message and the notes ready to apply.
 pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) -> Result<(), String> {
     if let Some(n) = v.get("note") {
@@ -432,6 +445,35 @@ pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) ->
                 note.region = Some([x, y, w, h]);
             }
         }
+    }
+    if let Some(p) = v.get("pin") {
+        let c = app.session.active_comp_id().ok_or("merlin.pin: no composition is open")?.0;
+        let secs = |v: &Value| v.as_f64().map(Tick::from_seconds_f64);
+        let kind = if let Some(id) = p.get("layer").and_then(Value::as_u64) {
+            super::PinKind::Layer { id }
+        } else if let Some(t) = p.get("frame").and_then(secs) {
+            super::PinKind::Frame { at: t }
+        } else if let Some([a, b]) = p.get("range").and_then(Value::as_array).map(Vec::as_slice) {
+            let (a, b) = (secs(a).ok_or("merlin.pin.range: seconds")?, secs(b).ok_or("merlin.pin.range: seconds")?);
+            super::PinKind::Range { start: a.min(b), end: a.max(b) }
+        } else if let Some(id) = p.get("note").and_then(Value::as_u64) {
+            super::PinKind::Note { id }
+        } else {
+            return Err("merlin.pin: give layer (id), frame (s), range ([s, s]) or note (id)".into());
+        };
+        let label = match &kind {
+            super::PinKind::Layer { id } => app
+                .session
+                .active_comp()
+                .and_then(|cp| cp.layer(effectcraft_engine::project::LayerId(*id)))
+                .map(|l| l.name.clone())
+                .ok_or("merlin.pin: no such layer")?,
+            super::PinKind::Frame { at } => display_time(app, c, *at),
+            super::PinKind::Range { start, end } => format!("{}–{}", display_time(app, c, *start), display_time(app, c, *end)),
+            super::PinKind::Note { id } => format!("Note {id}"),
+        };
+        let locked = p.get("locked").and_then(Value::as_bool).unwrap_or(kind.lockable());
+        super::mentions::add(app, super::Pin { comp: c, kind, label, locked });
     }
     if let Some(id) = v.get("removeNote").and_then(Value::as_u64) {
         remove_note(app, id);
@@ -694,6 +736,26 @@ pub(super) fn decide(app: &mut EffectcraftApp, ctx: &egui::Context, turn: u64, k
     }
 }
 
+/// After an edit while pins are locked: undo it and answer with an error naming what went outside,
+/// or pass the reply through when it stayed inside.
+fn enforce(app: &mut EffectcraftApp, scope: &Scope, cp: &Checkpoint, reply: Value) -> Value {
+    let comp = scope.comp;
+    let when = |t: Tick| display_time(app, comp, t);
+    let out = guard::check(cp.snapshot(), &app.session.project, scope, &when);
+    if out.is_empty() {
+        return reply;
+    }
+    let undone = cp.discard(&mut app.session);
+    let mut msg = String::from("Refused: this edit went outside what the user pinned and locked, so ");
+    msg.push_str(if undone { "none of it was applied" } else { "it could not be undone automatically; tell the user" });
+    msg.push_str(":\n");
+    for o in &out {
+        msg.push_str(&format!("- {o}\n"));
+    }
+    msg.push_str("Make the change within the locked pins, or tell the user it needs them unlocked.");
+    json!({"ok": false, "error": msg})
+}
+
 /// Per frame (whether or not the panel is shown): run workers' tool requests on the UI thread and
 /// take in their progress.
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
@@ -704,10 +766,16 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
         while let Ok(r) = rx.try_recv() {
             reqs.push((r, now + 3.0));
         }
+        let scope = app.ui.merlin.rt.worker.as_ref().and_then(|w| w.scope.clone());
         for (req, deadline) in reqs {
             let reply = req.reply.clone();
+            let guarded = scope.as_ref().filter(|_| req.method == "engine.execute").map(|sc| (sc, Checkpoint::take(&app.session)));
             match control::handle(app, ctx, &req, now) {
                 Outcome::Done(v) => {
+                    let v = match guarded {
+                        Some((sc, cp)) if cp.changed(&app.session) => enforce(app, sc, &cp, v),
+                        _ => v,
+                    };
                     let _ = reply.send(v);
                 }
                 Outcome::Retry(_) if now < deadline => {

@@ -486,3 +486,93 @@ fn the_control_channel_adds_and_applies_notes() {
     set(h.state_mut(), &ctx, &serde_json::json!({"removeNote": n.id})).unwrap();
     assert!(h.state().ui.merlin.notes.is_empty());
 }
+
+fn board(h: &mut Harness<'_, EffectcraftApp>) {
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    h.state_mut()
+        .session
+        .execute("script.run", serde_json::json!({"code": "var c = app.project.items.addComp('Board', 640, 360, 1, 4, 30); c.openInViewer(); c.layers.addSolid([0.2,0.4,0.9], 'Blue', 640, 360, 1); c.layers.addSolid([0.9,0.4,0.2], 'Orange', 100, 100, 1);"}))
+        .unwrap();
+    h.run_steps(2);
+}
+
+/// `@` opens a list of what can be pinned; Enter pins the highlighted entry, and the context chips
+/// pin the current frame or selected layers in one click.
+#[test]
+fn at_mentions_and_context_chips_pin_the_message() {
+    use effectcraft_ui_egui::panels::merlin::PinKind;
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.0));
+    click(&mut h, "merlin.input");
+    h.event(egui::Event::Text("make @Ora".into()));
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.mention.0").is_some(), "the list shows");
+    assert!(h.state().auto.find("merlin.mention.1").is_none(), "only Orange matches");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let pins = h.state().ui.merlin.pins.clone();
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert!(matches!(pins[0].kind, PinKind::Layer { .. }) && pins[0].label == "Orange" && pins[0].locked);
+    assert_eq!(h.state().ui.merlin.input, "make @Orange ", "Enter picked, not sent");
+    assert!(!h.state().ui.merlin.busy);
+
+    // A typed range.
+    h.event(egui::Event::Text("@1:00-2:00".into()));
+    h.run_steps(2);
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let range = h.state().ui.merlin.pins.last().cloned().unwrap();
+    let PinKind::Range { start, end } = range.kind else { panic!("{range:?}") };
+    assert_eq!((start.seconds(), end.seconds()), (1.0, 2.0));
+    assert!(range.locked);
+
+    // The time chip pins the current frame; its lock toggles; × removes a pin.
+    h.run_steps(2);
+    click(&mut h, "merlin.context.time");
+    assert!(matches!(h.state().ui.merlin.pins.last().map(|p| &p.kind), Some(PinKind::Frame { at }) if (at.seconds() - 1.0).abs() < 1e-9));
+    assert!(h.state().auto.find("merlin.pin.2.lock").is_none(), "a frame isn't lockable");
+    h.run_steps(2);
+    click(&mut h, "merlin.pin.0.lock");
+    assert!(!h.state().ui.merlin.pins[0].locked);
+    click(&mut h, "merlin.pin.2.remove");
+    assert_eq!(h.state().ui.merlin.pins.len(), 2);
+}
+
+/// A locked range keeps Merlin inside it: the demo's script adds layers spanning the whole comp,
+/// so the edit is refused, undone, and the model is told why; the pins go with the message.
+#[test]
+fn locked_pins_refuse_edits_outside_them() {
+    let mut h = harness();
+    board(&mut h);
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"pin": {}})).is_err());
+    set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [2.0, 1.0]}})).unwrap();
+    let before = h.state().session.project.clone();
+    let undo = h.state().session.history.undo.len();
+    h.state_mut().ui.merlin.input = "a title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    assert!(h.state().ui.merlin.pins.is_empty(), "pins go with the message");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[0], ChatItem::User { pins, .. } if pins.len() == 1 && pins[0].starts_with("🔒")), "{items:#?}");
+    let script = items
+        .iter()
+        .find_map(|i| if let ChatItem::Tool { name, state, summary, .. } = i { (name == "run_script").then_some((*state, summary.clone())) } else { None });
+    let (state, summary) = script.expect("the demo ran its script");
+    assert_eq!(state, ToolState::Failed);
+    assert!(summary.starts_with("Refused") && summary.contains("Demo Title"), "{summary}");
+    assert!(std::sync::Arc::ptr_eq(&h.state().session.project, &before), "nothing was applied");
+    assert_eq!(h.state().session.history.undo.len(), undo);
+    assert!(matches!(items.last(), Some(ChatItem::Turn { decision: Decision::NoChanges, .. })), "{items:#?}");
+
+    // Unlocked, the same request goes through.
+    set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [1.0, 2.0], "locked": false}})).unwrap();
+    h.state_mut().ui.merlin.input = "a title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { decision: Decision::Pending, .. })));
+}

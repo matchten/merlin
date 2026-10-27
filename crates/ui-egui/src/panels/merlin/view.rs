@@ -46,6 +46,8 @@ enum Act {
     Attach,
     Unattach(usize),
     Suggest(usize),
+    PinFrame,
+    PinLayers,
 }
 
 /// The panel's colours, derived from the theme so light and dark both work.
@@ -76,7 +78,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ui.painter().rect_filled(rect, 0.0, look.t.panel_bg);
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), 38.0));
     let chips = if app.ui.merlin.attachments.is_empty() { 0.0 } else { app.ui.merlin.rt.chips_h.max(CHIPS_H) + 2.0 };
-    let footer_h = (148.0 + chips).min(rect.height() * 0.6);
+    let pins = if app.ui.merlin.pins.is_empty() { 0.0 } else { app.ui.merlin.rt.pins_h.max(super::mentions::PIN_H) + 4.0 };
+    let footer_h = (148.0 + chips + pins).min(rect.height() * 0.6);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
     let middle = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
     let strip_h = super::strip::height(app, middle.height());
@@ -124,6 +127,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
             Act::SaveKey | Act::RemoveKey => native::save_or_remove_key(app, matches!(a, Act::SaveKey)),
+            Act::PinFrame => super::mentions::pin_current_frame(app),
+            Act::PinLayers => super::mentions::pin_selected_layers(app),
         }
     }
 }
@@ -325,7 +330,7 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     });
                 }
                 match item {
-                    ChatItem::User { text, attachments, notes } => {
+                    ChatItem::User { text, attachments, notes, pins } => {
                         ui.add_space(4.0);
                         egui::Frame::new()
                             .fill(look.card)
@@ -346,6 +351,18 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                                         let what =
                                             if n == 1 { tr("Applied 1 storyboard note").to_string() } else { tr_args("Applied {} storyboard notes", &[&n]) };
                                         ui.label(RichText::new(what).font(Tokens::medium(11.5)).color(t.text_dim));
+                                    });
+                                }
+                                if !pins.is_empty() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for p in pins {
+                                            ui.label(
+                                                RichText::new(format!("@{p}"))
+                                                    .font(Tokens::medium(11.5))
+                                                    .color(look.magic)
+                                                    .background_color(look.magic.gamma_multiply(0.12)),
+                                            );
+                                        }
                                     });
                                 }
                                 if !text.is_empty() {
@@ -799,13 +816,19 @@ fn drop_hint(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, look: &Look) {
 fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now: f64, acts: &mut Vec<Act>) {
     let t = look.t;
     let busy = app.ui.merlin.busy;
-    let inner = r.shrink2(vec2(10.0, 8.0));
+    let mut inner = r.shrink2(vec2(10.0, 8.0));
 
-    // The context Merlin will see, as quiet chips.
-    context_chips(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), 18.0)), look);
+    // What the message is pinned to, then the context Merlin will see, as quiet chips.
+    if !app.ui.merlin.pins.is_empty() {
+        let h = super::mentions::pins_ui(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), super::mentions::PIN_H)), look);
+        inner.min.y += h + 4.0;
+    }
+    context_chips(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), 18.0)), look, acts);
 
     let boxr = Rect::from_min_max(pos2(inner.min.x, inner.min.y + 24.0), inner.max);
     let focused = ui.ctx().memory(|m| m.has_focus(input_id()));
+    // The @ list takes the arrow keys and Enter while it shows.
+    let mentioning = super::mentions::keys(app, ui, focused);
     let f = ui.ctx().animate_bool_with_time(egui::Id::unique("merlin-composer-focus"), focused, 0.18);
     ui.painter().rect_filled(boxr, 12.0, look.card);
     ui.painter().rect_stroke(boxr, 12.0, Stroke::new(1.0 + 0.5 * f, lerp(look.border, look.magic.gamma_multiply(0.8), f)), StrokeKind::Inside);
@@ -819,7 +842,7 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     let text_r = Rect::from_min_max(pos2(boxr.min.x + 10.0, top), pos2(boxr.max.x - 10.0, boxr.max.y - bar_h - 2.0));
 
     // Enter sends, Shift+Enter starts a new line.
-    if !busy && focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+    if !busy && focused && !mentioning && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
         acts.push(Act::Send);
     }
     let mut c = child(ui, text_r);
@@ -830,9 +853,12 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         .font(Tokens::ui(BODY))
         .desired_width(text_r.width())
         .desired_rows(2)
-        .hint_text(RichText::new(tr("Ask Merlin to make something…")).color(t.text_faint));
+        .hint_text(RichText::new(tr("Ask Merlin… type @ to pin a layer or time")).color(t.text_faint));
     let resp = c.add(te);
     app.auto.add_response("merlin.input", &resp, "Message Merlin");
+    if mentioning {
+        super::mentions::popup_ui(app, ui, boxr, look);
+    }
 
     // Bottom bar: attach, a hint, send / stop.
     let bar = Rect::from_min_max(pos2(boxr.min.x + 6.0, boxr.max.y - bar_h - 2.0), pos2(boxr.max.x - 6.0, boxr.max.y - 4.0));
@@ -882,35 +908,54 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     }
 }
 
-/// The active comp, selected layers and time, as small chips.
-fn context_chips(app: &EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look) {
+/// The active comp, selected layers and time, as small chips; clicking the layers or the time pins
+/// them to the message.
+fn context_chips(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, acts: &mut Vec<Act>) {
     let t = look.t;
     let p = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
     let mut x = r.min.x;
     let cy = r.center().y;
-    let chip = |icon: Icon, text: String, x: &mut f32| {
-        let g = p.layout_no_wrap(text, Tokens::ui(11.0), t.text_faint);
+    let chip = |icon: Icon, text: String, x: &mut f32, hot: bool| {
+        let col = if hot { t.text } else { t.text_faint };
+        let g = p.layout_no_wrap(text, Tokens::ui(11.0), col);
         let w = g.size().x + 26.0;
         let cr = Rect::from_min_size(pos2(*x, cy - 9.0), vec2(w, 18.0));
-        p.rect_filled(cr, 9.0, t.hover.gamma_multiply(0.6));
-        icons::paint(&p, Rect::from_center_size(pos2(cr.min.x + 10.0, cy), vec2(10.0, 10.0)), icon, t.text_faint);
-        p.galley(pos2(cr.min.x + 18.0, cy - g.size().y / 2.0), g, t.text_faint);
+        p.rect_filled(cr, 9.0, if hot { t.hover } else { t.hover.gamma_multiply(0.6) });
+        icons::paint(&p, Rect::from_center_size(pos2(cr.min.x + 10.0, cy), vec2(10.0, 10.0)), icon, col);
+        p.galley(pos2(cr.min.x + 18.0, cy - g.size().y / 2.0), g, col);
         *x += w + 4.0;
+        cr
     };
+    let hovered = |id: &str| ui.ctx().read_response(egui::Id::unique(("merlin-ctx", id))).is_some_and(|r| r.hovered());
+    let (hot_layers, hot_time) = (hovered("layers"), hovered("time"));
     let s = &app.session;
+    let mut clickable = vec![];
     match s.active_comp() {
-        None => chip(Icon::Comp, tr("No composition").to_string(), &mut x),
+        None => {
+            chip(Icon::Comp, tr("No composition").to_string(), &mut x, false);
+        }
         Some(comp) => {
             let name = s.active_comp_id().and_then(|id| s.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
-            chip(Icon::Comp, short(&name, 22), &mut x);
+            chip(Icon::Comp, short(&name, 22), &mut x, false);
             let sel = &s.state.selected_layers;
             let names: Vec<String> = comp.layers.iter().filter(|l| sel.contains(&l.id)).map(|l| l.name.clone()).collect();
-            match names.as_slice() {
-                [] => {}
-                [one] => chip(Icon::TextLayer, short(one, 22), &mut x),
-                _ => chip(Icon::TextLayer, tr_args("{} layers", &[&names.len()]), &mut x),
+            let layers = match names.as_slice() {
+                [] => None,
+                [one] => Some(chip(Icon::TextLayer, short(one, 22), &mut x, hot_layers)),
+                _ => Some(chip(Icon::TextLayer, tr_args("{} layers", &[&names.len()]), &mut x, hot_layers)),
+            };
+            if let Some(cr) = layers {
+                clickable.push(("layers", cr, tr("Pin the selected layers to your message (locked: Merlin edits only them)"), Act::PinLayers));
             }
-            chip(Icon::Stopwatch, crate::panels::timecode(s, comp, s.time()), &mut x);
+            let cr = chip(Icon::Stopwatch, crate::panels::timecode(s, comp, s.time()), &mut x, hot_time);
+            clickable.push(("time", cr, tr("Pin this frame to your message (or type @)"), Act::PinFrame));
+        }
+    }
+    for (id, cr, tip, act) in clickable {
+        let resp = ui.interact(cr, egui::Id::unique(("merlin-ctx", id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        app.auto.add(&format!("merlin.context.{id}"), cr, tip);
+        if resp.on_hover_text(tip).clicked() {
+            acts.push(act);
         }
     }
 }

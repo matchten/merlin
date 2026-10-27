@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod markdown;
 #[cfg(not(target_arch = "wasm32"))]
+mod mentions;
+#[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod strip;
@@ -46,6 +48,8 @@ pub struct MerlinPanel {
     pub editing_note: Option<u64>,
     /// The note whose area is being marked on its frame (the frame replaces the conversation).
     pub marking_note: Option<u64>,
+    /// What the next message is pinned to (`@` mentions, or a click on a context chip).
+    pub pins: Vec<Pin>,
     #[serde(skip)]
     pub(crate) rt: Runtime,
 }
@@ -62,6 +66,36 @@ pub struct MerlinSettings {
     pub base_url: String,
     /// Anthropic effort: `low` … `max`; empty means `high`.
     pub effort: String,
+}
+
+/// Something the next message is pinned to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pin {
+    /// The comp it belongs to (item id).
+    pub comp: u64,
+    pub kind: PinKind,
+    /// As shown on its chip (a layer name, a time as the app displays it).
+    pub label: String,
+    /// A hard limit: Merlin's edits must stay inside the locked layers and time range.
+    #[serde(default)]
+    pub locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PinKind {
+    Layer { id: u64 },
+    Frame { at: effectcraft_engine::time::Tick },
+    Range { start: effectcraft_engine::time::Tick, end: effectcraft_engine::time::Tick },
+    Note { id: u64 },
+}
+
+impl PinKind {
+    /// Layers and ranges can be locked (a single frame or a note is context only).
+    pub fn lockable(&self) -> bool {
+        matches!(self, PinKind::Layer { .. } | PinKind::Range { .. })
+    }
 }
 
 /// A file attached to the message being written (decoded off the UI thread).
@@ -117,6 +151,9 @@ pub enum ChatItem {
         /// Ids of the notes it applied.
         #[serde(default)]
         notes: Vec<u64>,
+        /// What it was pinned to, as shown.
+        #[serde(default)]
+        pins: Vec<String>,
     },
     Assistant {
         text: String,
