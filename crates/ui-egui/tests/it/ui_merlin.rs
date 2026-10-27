@@ -212,7 +212,7 @@ fn merlin_sends_attached_images_with_the_message() {
     assert!(h.state().ui.merlin.attachments.is_empty(), "sent with the message");
     wait_idle(&mut h);
     let items = h.state().ui.merlin.items.clone();
-    let Some(ChatItem::User { text, attachments }) = items.first() else { panic!("{items:#?}") };
+    let Some(ChatItem::User { text, attachments, .. }) = items.first() else { panic!("{items:#?}") };
     assert!(text.is_empty());
     assert_eq!(attachments, &paths[..2]);
     assert!(
@@ -361,4 +361,381 @@ fn merlin_snapshot() {
     h.run_steps(4);
     let img = h.render().expect("render");
     img.save(&out).unwrap();
+}
+
+/// Drag from `a` to `b` in a few moves, holding `modifiers` (pressed once the drag is under way,
+/// as the other drag tests do).
+fn drag(h: &mut Harness<'_, EffectcraftApp>, a: egui::Pos2, b: egui::Pos2, modifiers: egui::Modifiers) {
+    h.event(egui::Event::PointerMoved(a));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    for k in 1..=6 {
+        h.event(egui::Event::PointerMoved(a + (b - a) * (k as f32 / 6.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(3);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+}
+
+fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
+    let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}")).clone();
+    egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
+}
+
+/// The storyboard strip: scrub, drop a note on a frame and one on a range, mark an area, apply them
+/// (the demo reports each one handled), and the chat shows what was applied.
+#[test]
+fn storyboard_notes_are_written_on_the_strip_and_applied_as_a_turn() {
+    use merlin_agent::notes::NoteStatus;
+    let mut h = harness();
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    h.state_mut()
+        .session
+        .execute("script.run", serde_json::json!({"code": "var c = app.project.items.addComp('Board', 640, 360, 1, 4, 30); c.openInViewer(); c.layers.addSolid([0.2,0.4,0.9], 'Blue', 640, 360, 1);"}))
+        .unwrap();
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.strip").is_none(), "collapsed by default");
+    click(&mut h, "merlin.strip.toggle");
+    assert!(h.state().ui.merlin.strip_open);
+    h.run_steps(2);
+
+    // A click on the strip moves the current time there (snapped to a frame).
+    click(&mut h, "merlin.strip");
+    let t = h.state().session.time().seconds();
+    assert!((t - 2.0).abs() < 0.1, "clicked the middle of a 4 s comp: {t}");
+
+    // + Note: a note at the current time, its editor open and focused for typing.
+    click(&mut h, "merlin.note.add");
+    let notes = h.state().ui.merlin.notes.clone();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(h.state().ui.merlin.editing_note, Some(notes[0].id));
+    assert!((notes[0].start.seconds() - t).abs() < 1e-6 && notes[0].end.is_none());
+    h.input_mut().events.push(egui::Event::Text("Make the blue warmer".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.merlin.notes[0].text, "Make the blue warmer");
+    assert!(h.state().auto.find("merlin.notes.apply").is_some(), "a written note can be applied");
+
+    // Mark an area of its frame: the frame replaces the chat; drag a box; Done.
+    click(&mut h, "merlin.note.mark");
+    assert!(h.state().ui.merlin.marking_note.is_some());
+    let area = rect_of(&h, "merlin.mark.area");
+    drag(&mut h, area.lerp_inside(egui::vec2(0.25, 0.25)), area.lerp_inside(egui::vec2(0.5, 0.75)), egui::Modifiers::NONE);
+    let [x, y, w, hh] = h.state().ui.merlin.notes[0].region.expect("an area was marked");
+    assert!((x - 160.0).abs() < 8.0 && (y - 90.0).abs() < 8.0 && (w - 160.0).abs() < 8.0 && (hh - 180.0).abs() < 8.0, "{:?}", [x, y, w, hh]);
+    click(&mut h, "merlin.mark.done");
+    assert!(h.state().ui.merlin.marking_note.is_none());
+
+    // Shift-drag on the strip: a range note from 0.4 s to 1.2 s (the strip has grown a notes list).
+    let film = rect_of(&h, "merlin.strip");
+    let a = egui::pos2(film.min.x + film.width() * 0.1, film.center().y);
+    let b = egui::pos2(film.min.x + film.width() * 0.3, film.center().y);
+    drag(&mut h, a, b, egui::Modifiers::SHIFT);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert_eq!(notes.len(), 2, "{notes:#?}");
+    let range = notes[1].clone();
+    let (s, e) = range.span();
+    assert!((s.seconds() - 0.4).abs() < 0.07 && (e.seconds() - 1.2).abs() < 0.07, "{s:?}..{e:?}");
+    h.input_mut().events.push(egui::Event::Text("Slower here".into()));
+    h.run_steps(2);
+
+    // An empty note isn't sent; delete it.
+    click(&mut h, "merlin.note.add");
+    let empty = h.state().ui.merlin.notes.last().unwrap().id;
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.note.{empty}.delete"));
+    assert_eq!(h.state().ui.merlin.notes.len(), 2);
+    h.run_steps(2);
+
+    // Apply: one turn; the demo looks at the notes' frames and resolves each one.
+    click(&mut h, "merlin.notes.apply");
+    assert!(h.state().ui.merlin.busy);
+    assert!(h.state().ui.merlin.notes.iter().all(|n| n.status == NoteStatus::Sent));
+    wait_idle(&mut h);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| matches!(n.status, NoteStatus::Addressed { .. })), "{notes:#?}");
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[0], ChatItem::User { text, notes, .. } if text.is_empty() && notes.len() == 2), "{items:#?}");
+    let resolved = items.iter().filter(|i| matches!(i, ChatItem::Tool { name, state: ToolState::Done, .. } if name == "resolve_note")).count();
+    assert_eq!(resolved, 2, "{items:#?}");
+    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "nothing left to apply");
+    assert!(matches!(items.last(), Some(ChatItem::Turn { label, .. }) if label == "Merlin: Apply 2 notes"));
+}
+
+/// Agents and scripts add notes and apply them through `ui.set {"merlin": …}`.
+#[test]
+fn the_control_channel_adds_and_applies_notes() {
+    let mut h = harness();
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1, "text": "x"}})).unwrap_err().contains("no composition"));
+    h.state_mut().session.execute("script.run", serde_json::json!({"code": "app.project.items.addComp('C', 320, 180, 1, 3, 25).openInViewer();"})).unwrap();
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"note": {"text": "x"}})).unwrap_err().contains("time"));
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"applyNotes": true})).unwrap_err().contains("nothing to send"));
+    set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 2.0, "end": 0.5, "text": "fade out here", "region": [1, 2, 3, 4], "layers": [99]}})).unwrap();
+    let n = h.state().ui.merlin.notes[0].clone();
+    assert_eq!((n.start.seconds(), n.end.map(|e| e.seconds())), (0.5, Some(2.0)), "a reversed range is put in order");
+    assert_eq!((n.region, n.layers.clone()), (Some([1.0, 2.0, 3.0, 4.0]), vec![99]));
+    set(h.state_mut(), &ctx, &serde_json::json!({"applyNotes": true})).unwrap();
+    wait_idle(&mut h);
+    assert!(matches!(h.state().ui.merlin.notes[0].status, merlin_agent::notes::NoteStatus::Addressed { .. }));
+    set(h.state_mut(), &ctx, &serde_json::json!({"removeNote": n.id})).unwrap();
+    assert!(h.state().ui.merlin.notes.is_empty());
+}
+
+fn board(h: &mut Harness<'_, EffectcraftApp>) {
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    h.state_mut()
+        .session
+        .execute("script.run", serde_json::json!({"code": "var c = app.project.items.addComp('Board', 640, 360, 1, 4, 30); c.openInViewer(); c.layers.addSolid([0.2,0.4,0.9], 'Blue', 640, 360, 1); c.layers.addSolid([0.9,0.4,0.2], 'Orange', 100, 100, 1);"}))
+        .unwrap();
+    h.run_steps(2);
+}
+
+/// `@` opens a list of what can be pinned; Enter pins the highlighted entry, and the context chips
+/// pin the current frame or selected layers in one click.
+#[test]
+fn at_mentions_and_context_chips_pin_the_message() {
+    use effectcraft_ui_egui::panels::merlin::PinKind;
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.0));
+    click(&mut h, "merlin.input");
+    h.event(egui::Event::Text("make @Ora".into()));
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.mention.0").is_some(), "the list shows");
+    assert!(h.state().auto.find("merlin.mention.1").is_none(), "only Orange matches");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let pins = h.state().ui.merlin.pins.clone();
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert!(matches!(pins[0].kind, PinKind::Layer { .. }) && pins[0].label == "Orange" && pins[0].locked);
+    assert_eq!(h.state().ui.merlin.input, "make @Orange ", "Enter picked, not sent");
+    assert!(!h.state().ui.merlin.busy);
+
+    // A typed range.
+    h.event(egui::Event::Text("@1:00-2:00".into()));
+    h.run_steps(2);
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let range = h.state().ui.merlin.pins.last().cloned().unwrap();
+    let PinKind::Range { start, end } = range.kind else { panic!("{range:?}") };
+    assert_eq!((start.seconds(), end.seconds()), (1.0, 2.0));
+    assert!(range.locked);
+
+    // The time chip pins the current frame; its lock toggles; × removes a pin.
+    h.run_steps(2);
+    click(&mut h, "merlin.context.time");
+    assert!(matches!(h.state().ui.merlin.pins.last().map(|p| &p.kind), Some(PinKind::Frame { at }) if (at.seconds() - 1.0).abs() < 1e-9));
+    assert!(h.state().auto.find("merlin.pin.2.lock").is_none(), "a frame isn't lockable");
+    h.run_steps(2);
+    click(&mut h, "merlin.pin.0.lock");
+    assert!(!h.state().ui.merlin.pins[0].locked);
+    click(&mut h, "merlin.pin.2.remove");
+    assert_eq!(h.state().ui.merlin.pins.len(), 2);
+}
+
+/// A locked range keeps Merlin inside it: the demo's script adds layers spanning the whole comp,
+/// so the edit is refused, undone, and the model is told why; the pins go with the message.
+#[test]
+fn locked_pins_refuse_edits_outside_them() {
+    let mut h = harness();
+    board(&mut h);
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"pin": {}})).is_err());
+    set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [2.0, 1.0]}})).unwrap();
+    let before = h.state().session.project.clone();
+    let undo = h.state().session.history.undo.len();
+    h.state_mut().ui.merlin.input = "a title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    assert!(h.state().ui.merlin.pins.is_empty(), "pins go with the message");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[0], ChatItem::User { pins, .. } if pins.len() == 1 && pins[0].starts_with("🔒")), "{items:#?}");
+    let script = items
+        .iter()
+        .find_map(|i| if let ChatItem::Tool { name, state, summary, .. } = i { (name == "run_script").then_some((*state, summary.clone())) } else { None });
+    let (state, summary) = script.expect("the demo ran its script");
+    assert_eq!(state, ToolState::Failed);
+    assert!(summary.starts_with("Refused") && summary.contains("Demo Title"), "{summary}");
+    assert!(std::sync::Arc::ptr_eq(&h.state().session.project, &before), "nothing was applied");
+    assert_eq!(h.state().session.history.undo.len(), undo);
+    assert!(matches!(items.last(), Some(ChatItem::Turn { decision: Decision::NoChanges, .. })), "{items:#?}");
+
+    // Unlocked, the same request goes through.
+    set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [1.0, 2.0], "locked": false}})).unwrap();
+    h.state_mut().ui.merlin.input = "a title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { decision: Decision::Pending, .. })));
+}
+
+/// Plan mode: Merlin only looks and answers with beats on the storyboard; Build it turns them into
+/// notes and builds them in one turn; a plan can be revised or discarded.
+#[test]
+fn plan_mode_proposes_beats_and_builds_them() {
+    use effectcraft_ui_egui::panels::merlin::{Mode, PlanState};
+    use merlin_agent::notes::{Author, NoteStatus};
+    let mut h = harness();
+    board(&mut h);
+    click(&mut h, "merlin.mode.plan");
+    assert_eq!(h.state().ui.merlin.mode, Mode::Plan);
+    let before = h.state().session.project.clone();
+    h.state_mut().ui.merlin.input = "Big Launch".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(std::sync::Arc::ptr_eq(&h.state().session.project, &before), "plan mode builds nothing");
+    let items = h.state().ui.merlin.items.clone();
+    let plan = items.iter().position(|i| matches!(i, ChatItem::Plan { .. })).expect("a plan card");
+    let ChatItem::Plan { beats, state, title } = &items[plan] else { unreachable!() };
+    assert_eq!((title.as_str(), *state, beats.len()), ("Big Launch", PlanState::Proposed, 3));
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| n.author == Author::Merlin && n.status == NoteStatus::Proposed && n.end.is_some()), "{notes:#?}");
+    assert!(h.state().ui.merlin.strip_open, "the beats show on the storyboard");
+    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "beats aren't notes to apply yet");
+
+    // Asking again revises: the new plan replaces the old beats.
+    h.state_mut().ui.merlin.input = "Make it faster".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[plan], ChatItem::Plan { state: PlanState::Revised, .. }));
+    let latest = items.iter().rposition(|i| matches!(i, ChatItem::Plan { .. })).unwrap();
+    assert_eq!(h.state().ui.merlin.notes.len(), 3, "old beats replaced");
+
+    // Build it: Act mode, one turn that resolves every beat.
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.plan.{latest}.build"));
+    assert_eq!(h.state().ui.merlin.mode, Mode::Act);
+    wait_idle(&mut h);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| matches!(n.status, NoteStatus::Addressed { .. })), "{notes:#?}");
+    assert!(matches!(&h.state().ui.merlin.items[latest], ChatItem::Plan { state: PlanState::Built, .. }));
+}
+
+#[test]
+fn a_discarded_plan_takes_its_beats_off_the_storyboard() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.mode = effectcraft_ui_egui::panels::merlin::Mode::Plan;
+    h.state_mut().ui.merlin.input = "Intro".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let plan = h.state().ui.merlin.items.iter().position(|i| matches!(i, ChatItem::Plan { .. })).unwrap();
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.plan.{plan}.discard"));
+    assert!(h.state().ui.merlin.notes.is_empty());
+}
+
+/// Writes `target/test-out/merlin-plan.png` (a plan card, beats on the storyboard, a built note):
+/// `cargo test -p effectcraft-ui-egui --test it merlin_plan_snapshot -- --ignored`.
+#[test]
+#[ignore]
+fn merlin_plan_snapshot() {
+    let mut h = harness();
+    board(&mut h);
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-plan.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    click(&mut h, "merlin.mode.plan");
+    h.state_mut().ui.merlin.input = "A launch title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [0.6, 1.2]}})).unwrap();
+    h.state_mut().ui.merlin.input = "Make beat 2 snappier".into();
+    h.run_steps(6);
+    h.render().expect("render").save(out).unwrap();
+}
+
+/// Restore to here puts the project back as it was before a message (a history jump, so the later
+/// work stays reachable).
+#[test]
+fn restore_to_here_returns_to_before_a_message() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.input = "First".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(has_comp(&h, "Board"));
+    let layers = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().map(|c| c.layers.len()).unwrap_or(0);
+    let after_first = layers(&h);
+    h.state_mut().ui.merlin.input = "Second".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(layers(&h) > after_first);
+    let first = h.state().ui.merlin.items.iter().position(|i| matches!(i, ChatItem::User { text, .. } if text == "First")).unwrap();
+    // Scroll the conversation back to the top.
+    let log = rect_of(&h, "merlin.log").center();
+    h.input_mut().events.push(egui::Event::PointerMoved(log));
+    for _ in 0..10 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 400.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    click(&mut h, &format!("merlin.item.{first}.restore"));
+    assert_eq!(layers(&h), 2, "back to the board's two layers");
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Notice { error: false, .. })));
+    // The later state is still in the history tree.
+    assert!(h.state().session.history_tree().len() >= 3);
+}
+
+/// The chat, notes and conversation are saved next to the project and come back when it is
+/// opened again; another project starts with a fresh chat.
+#[test]
+fn the_chat_is_saved_with_the_project() {
+    let mut h = harness();
+    board(&mut h);
+    let d = temp_dir("persist");
+    let proj = d.join("Board.ecproj");
+    let chat = d.join("Board.merlin.json");
+    let _ = std::fs::remove_file(&chat);
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1.0, "text": "warmer"}})).unwrap();
+    h.state_mut().ui.merlin.input = "Hello".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(!h.state().ui.merlin.items.is_empty(), "Save As kept the chat");
+    for _ in 0..600 {
+        h.run_steps(1);
+        if chat.exists() && std::fs::read_to_string(&chat).is_ok_and(|t| t.contains("resolve_note")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(&chat).expect("saved next to the project");
+    assert!(text.contains("\"warmer\"") && text.contains("\"conversation\""));
+    let items = h.state().ui.merlin.items.len();
+
+    // Another project: a fresh chat. Opening this one again brings it back.
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().ui.merlin.items.is_empty() && h.state().ui.merlin.notes.is_empty(), "{:#?}", h.state().ui.merlin.items);
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.merlin.items.len(), items);
+    assert_eq!(h.state().ui.merlin.notes.len(), 1);
+    assert!(matches!(h.state().ui.merlin.notes[0].status, merlin_agent::notes::NoteStatus::Addressed { .. }));
+    assert!(h.state().ui.merlin.items.iter().all(|i| !matches!(i, ChatItem::Turn { decision: Decision::Pending, .. })));
 }

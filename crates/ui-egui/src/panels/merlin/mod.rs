@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod markdown;
 #[cfg(not(target_arch = "wasm32"))]
+mod mentions;
+#[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(not(target_arch = "wasm32"))]
+mod strip;
 #[cfg(not(target_arch = "wasm32"))]
 mod view;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,6 +39,19 @@ pub struct MerlinPanel {
     pub attachments: Vec<Attached>,
     /// A turn is running.
     pub busy: bool,
+    /// Notes on moments of the timeline (the storyboard strip), applied together as a turn.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub notes: Vec<merlin_agent::notes::Note>,
+    /// The storyboard strip is expanded.
+    pub strip_open: bool,
+    /// The note whose editor is open.
+    pub editing_note: Option<u64>,
+    /// The note whose area is being marked on its frame (the frame replaces the conversation).
+    pub marking_note: Option<u64>,
+    /// What the next message is pinned to (`@` mentions, or a click on a context chip).
+    pub pins: Vec<Pin>,
+    /// Act (build) or Plan (propose timed beats first).
+    pub mode: Mode,
     #[serde(skip)]
     pub(crate) rt: Runtime,
 }
@@ -51,6 +68,58 @@ pub struct MerlinSettings {
     pub base_url: String,
     /// Anthropic effort: `low` … `max`; empty means `high`.
     pub effort: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Mode {
+    /// Merlin builds right away.
+    #[default]
+    Act,
+    /// Merlin only looks, and answers with a plan of timed beats to edit and approve.
+    Plan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlanState {
+    /// Waiting for Build or Discard (or a revision).
+    Proposed,
+    Building,
+    Built,
+    Discarded,
+    /// A later plan replaced it.
+    Revised,
+}
+
+/// Something the next message is pinned to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pin {
+    /// The comp it belongs to (item id).
+    pub comp: u64,
+    pub kind: PinKind,
+    /// As shown on its chip (a layer name, a time as the app displays it).
+    pub label: String,
+    /// A hard limit: Merlin's edits must stay inside the locked layers and time range.
+    #[serde(default)]
+    pub locked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PinKind {
+    Layer { id: u64 },
+    Frame { at: effectcraft_engine::time::Tick },
+    Range { start: effectcraft_engine::time::Tick, end: effectcraft_engine::time::Tick },
+    Note { id: u64 },
+}
+
+impl PinKind {
+    /// Layers and ranges can be locked (a single frame or a note is context only).
+    pub fn lockable(&self) -> bool {
+        matches!(self, PinKind::Layer { .. } | PinKind::Range { .. })
+    }
 }
 
 /// A file attached to the message being written (decoded off the UI thread).
@@ -103,6 +172,15 @@ pub enum ChatItem {
         /// Paths of the files sent with it (thumbnails are kept by the runtime).
         #[serde(default)]
         attachments: Vec<String>,
+        /// Ids of the notes it applied.
+        #[serde(default)]
+        notes: Vec<u64>,
+        /// What it was pinned to, as shown.
+        #[serde(default)]
+        pins: Vec<String>,
+        /// The history state before its turn (Restore to here).
+        #[serde(default)]
+        checkpoint: Option<String>,
     },
     Assistant {
         text: String,
@@ -137,10 +215,20 @@ pub enum ChatItem {
         tool_calls: usize,
         input_tokens: u64,
         output_tokens: u64,
+        /// Approximate cost in dollars (models with known prices).
+        #[serde(default)]
+        cost: Option<f64>,
     },
     Notice {
         text: String,
         error: bool,
+    },
+    /// A plan Merlin proposed: its beats are notes on the storyboard.
+    Plan {
+        title: String,
+        /// The beats' note ids, in time order.
+        beats: Vec<u64>,
+        state: PlanState,
     },
 }
 

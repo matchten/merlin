@@ -8,15 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use effectcraft_engine::time::Tick;
 use merlin_agent::agent_loop::{AgentEvent, TurnEnd, TurnOutcome, turn_label};
 use merlin_agent::attachment::{self, Attachment};
 use merlin_agent::checkpoint::Checkpoint;
 use merlin_agent::conversation::{Message, Part};
+use merlin_agent::guard::{self, Scope};
 use merlin_agent::keys::{self, KeySource};
-use merlin_agent::{AgentConfig, ProviderKind, RemoteHost, providers, run_turn, transport};
+use merlin_agent::notes::{self as note_model, Note, NoteBrief, NoteStatus};
+use merlin_agent::{AgentConfig, ProviderKind, RemoteHost, TurnContext, providers, run_turn_with, transport};
 use serde_json::{Value, json};
 
-use super::{AttachState, Attached, ChatItem, Decision, MerlinSettings, ToolState};
+use super::{AttachState, Attached, ChatItem, Decision, MerlinSettings, Mode, PlanState, ToolState};
 use crate::EffectcraftApp;
 use crate::control::{self, ControlRequest, Outcome};
 use crate::dock::PanelKind;
@@ -59,6 +62,10 @@ struct Worker {
     stopping_since: Option<f64>,
     tool_calls: usize,
     status: Option<String>,
+    /// The limits the message's locked pins set (each edit outside them is refused).
+    scope: Option<Scope>,
+    /// The model the turn runs on (for its cost).
+    model: String,
 }
 
 /// What the panel keeps outside its serialized state.
@@ -94,6 +101,28 @@ pub(crate) struct Runtime {
     pub(super) chip_appear: HashMap<String, f64>,
     /// The clock the chips' fade-in reads (the panel's last frame time).
     pub(super) now: f64,
+    /// The storyboard's filmstrip and the render refreshing it.
+    pub(super) film: Option<super::strip::Film>,
+    pub(super) film_job: Option<super::strip::Pending>,
+    pub(super) strip_drag: Option<super::strip::Drag>,
+    /// The frame shown while marking a note's area, its render, and the box being dragged (comp px).
+    pub(super) mark: Option<(super::strip::FilmKey, egui::TextureHandle)>,
+    pub(super) mark_job: Option<super::strip::Pending>,
+    pub(super) mark_drag: Option<egui::Pos2>,
+    /// A note just added, whose text field takes the focus once.
+    pub(super) focus_note: Option<u64>,
+    /// The highlighted entry of the `@` list, and the `@` it was dismissed at (Escape).
+    pub(super) mention_sel: usize,
+    pub(super) mention_off: Option<usize>,
+    /// The pin chips' height last frame (they wrap in a narrow panel).
+    pub(super) pins_h: f32,
+    /// The project file the chat belongs to (`Some(None)`: an unsaved project), once known.
+    chat_for: Option<Option<String>>,
+    /// The project state seen last frame (to tell Save As from opening another project).
+    seen_project: usize,
+    /// What was last saved, and when the panel last checked.
+    saved_fingerprint: u64,
+    last_save_check: f64,
 }
 
 impl Clone for Runtime {
@@ -155,10 +184,178 @@ fn notice(app: &mut EffectcraftApp, text: impl Into<String>, error: bool) {
     app.ui.merlin.items.push(ChatItem::Notice { text: text.into(), error });
 }
 
-/// Send the typed message as a new turn.
+/// A comp time as the panel shows it: the project's display style (`0:00:01:12`, or frames).
+pub(super) fn display_time(app: &EffectcraftApp, comp: u64, t: Tick) -> String {
+    match app.session.project.comp(effectcraft_engine::project::ItemId(comp)) {
+        Some(c) => crate::panels::timecode(&app.session, c, t),
+        None => format!("{:.2}s", t.seconds()),
+    }
+}
+
+/// A comp time as the agent reads it: the display, the frame and the seconds.
+fn agent_time(app: &EffectcraftApp, comp: u64, t: Tick) -> String {
+    let frame = app.session.project.comp(effectcraft_engine::project::ItemId(comp)).map(|c| c.frame_rate.frame_at(t)).unwrap_or(0);
+    note_model::time_label(&display_time(app, comp, t), frame, t.seconds())
+}
+
+/// Notes ready to apply: open, written, and on a comp that still exists.
+pub(super) fn ready_notes(app: &EffectcraftApp) -> usize {
+    app.ui.merlin.notes.iter().filter(|n| is_ready(app, n)).count()
+}
+
+fn is_ready(app: &EffectcraftApp, n: &Note) -> bool {
+    app.ui.merlin.mode == Mode::Act
+        && n.status == NoteStatus::Open
+        && !n.text.trim().is_empty()
+        && app.session.project.comp(effectcraft_engine::project::ItemId(n.comp)).is_some()
+}
+
+/// Every note on an existing comp, spelled out for the agent; the ready ones are sent.
+fn note_briefs(app: &EffectcraftApp) -> Vec<NoteBrief> {
+    app.ui
+        .merlin
+        .notes
+        .iter()
+        .filter_map(|n| {
+            let comp = app.session.project.comp(effectcraft_engine::project::ItemId(n.comp))?;
+            let layers =
+                n.layers.iter().filter_map(|id| comp.layer(effectcraft_engine::project::LayerId(*id)).map(|l| format!("\"{}\" (id {id})", l.name))).collect();
+            Some(NoteBrief {
+                note: n.clone(),
+                at: agent_time(app, n.comp, n.start),
+                until: n.end.filter(|e| *e != n.start).map(|e| agent_time(app, n.comp, e)),
+                layers,
+                comp_size: (comp.width, comp.height),
+                send: is_ready(app, n),
+            })
+        })
+        .collect()
+}
+
+/// The active comp's proposed beats as lines, for a plan revision.
+fn current_plan(app: &EffectcraftApp) -> Option<String> {
+    let c = app.session.active_comp_id()?.0;
+    let mut beats: Vec<&Note> = app.ui.merlin.notes.iter().filter(|n| n.comp == c && n.status == NoteStatus::Proposed).collect();
+    beats.sort_by_key(|n| n.start);
+    let lines: Vec<String> =
+        beats.iter().map(|n| format!("- {} to {}: {}", agent_time(app, c, n.start), agent_time(app, c, n.end.unwrap_or(n.start)), n.text.trim())).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// A plan arrived: its beats replace the comp's earlier proposed beats on the storyboard, and a
+/// plan card joins the chat.
+fn take_plan(app: &mut EffectcraftApp, title: String, beats: Vec<merlin_agent::Beat>) {
+    let Some(cid) = app.session.active_comp_id() else { return };
+    let Some(comp) = app.session.active_comp() else { return };
+    let (rate, dur) = (comp.frame_rate, comp.duration);
+    let snap = |s: f64| rate.tick_of(rate.frame_at(Tick::from_seconds_f64(s).min(dur)).max(0));
+    let layers: Vec<(String, u64)> = comp.layers.iter().map(|l| (l.name.to_lowercase(), l.id.0)).collect();
+    let panel = &mut app.ui.merlin;
+    let old: Vec<u64> = panel.notes.iter().filter(|n| n.comp == cid.0 && n.status == NoteStatus::Proposed).map(|n| n.id).collect();
+    panel.notes.retain(|n| !old.contains(&n.id));
+    for it in &mut panel.items {
+        if let ChatItem::Plan { state: s @ PlanState::Proposed, .. } = it {
+            *s = PlanState::Revised;
+        }
+    }
+    let mut next = panel.notes.iter().map(|n| n.id).max().unwrap_or(0);
+    let mut ids = vec![];
+    for b in beats {
+        next = next.saturating_add(1);
+        let (start, end) = (snap(b.start), snap(b.end));
+        let ls = b.layers.iter().filter_map(|name| layers.iter().find(|(l, _)| *l == name.to_lowercase()).map(|(_, id)| *id)).collect();
+        panel.notes.push(Note {
+            id: next,
+            comp: cid.0,
+            start,
+            end: (end > start).then_some(end),
+            layers: ls,
+            text: b.text,
+            author: merlin_agent::notes::Author::Merlin,
+            status: NoteStatus::Proposed,
+            ..Note::default()
+        });
+        ids.push(next);
+    }
+    panel.strip_open = true;
+    panel.items.push(ChatItem::Plan { title, beats: ids, state: PlanState::Proposed });
+}
+
+/// Build the plan card at `item`: its beats become notes to apply, in Act mode.
+pub(super) fn build_plan(app: &mut EffectcraftApp, ctx: &egui::Context, item: usize) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let panel = &mut app.ui.merlin;
+    let Some(ChatItem::Plan { title, beats, state }) = panel.items.get_mut(item) else { return };
+    if *state != PlanState::Proposed {
+        return;
+    }
+    *state = PlanState::Building;
+    let (title, beats) = (title.clone(), beats.clone());
+    for n in panel.notes.iter_mut().filter(|n| beats.contains(&n.id) && n.status == NoteStatus::Proposed) {
+        n.status = NoteStatus::Open;
+    }
+    panel.mode = Mode::Act;
+    if panel.input.trim().is_empty() {
+        panel.input = tr_args("Build the plan “{}”: work through its beats in order and resolve each one when it's done.", &[&title]);
+    }
+    start_turn(app, ctx);
+}
+
+/// Drop the plan card at `item` and its beats.
+pub(super) fn discard_plan(app: &mut EffectcraftApp, item: usize) {
+    let panel = &mut app.ui.merlin;
+    let Some(ChatItem::Plan { beats, state, .. }) = panel.items.get_mut(item) else { return };
+    if *state != PlanState::Proposed {
+        return;
+    }
+    *state = PlanState::Discarded;
+    let beats = beats.clone();
+    for id in beats {
+        remove_note(app, id);
+    }
+}
+
+/// A new note at `start` (a range to `end`) on the active comp, about the selected layers; its
+/// editor opens. `None` without a comp.
+pub(super) fn add_note(app: &mut EffectcraftApp, start: Tick, end: Option<Tick>, text: &str) -> Option<u64> {
+    let comp = app.session.active_comp_id()?;
+    let panel = &mut app.ui.merlin;
+    let id = panel.notes.iter().map(|n| n.id).max().unwrap_or(0).saturating_add(1);
+    let end = end.filter(|e| *e != start);
+    let (start, end) = match end {
+        Some(e) if e < start => (e, Some(start)),
+        _ => (start, end),
+    };
+    let layers = app.session.state.selected_layers.iter().map(|l| l.0).collect();
+    panel.notes.push(Note { id, comp: comp.0, start, end, layers, text: text.to_string(), ..Note::default() });
+    panel.strip_open = true;
+    panel.editing_note = Some(id);
+    panel.rt.focus_note = Some(id);
+    panel.settings_open = false;
+    Some(id)
+}
+
+pub(super) fn remove_note(app: &mut EffectcraftApp, id: u64) {
+    let p = &mut app.ui.merlin;
+    p.notes.retain(|n| n.id != id);
+    if p.editing_note == Some(id) {
+        p.editing_note = None;
+    }
+    if p.marking_note == Some(id) {
+        p.marking_note = None;
+    }
+    for k in [format!("note-before:{id}"), format!("note-after:{id}")] {
+        p.rt.frames.remove(&k);
+        p.rt.textures.remove(&k);
+    }
+}
+
+/// Send the typed message, with the notes ready to apply, as a new turn.
 pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let text = app.ui.merlin.input.trim().to_string();
-    if !can_send(&app.ui.merlin) || app.ui.merlin.rt.worker.is_some() {
+    if !can_send(app) || app.ui.merlin.rt.worker.is_some() {
         return;
     }
     let cfg = app.ui.merlin.settings.config();
@@ -169,7 +366,23 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
     }
     let checkpoint = Checkpoint::take(&app.session);
+    let restore_id = checkpoint.state_id();
+    let model = cfg.model().to_string();
+    let briefs = note_briefs(app);
+    let note_ids: Vec<u64> = briefs.iter().filter(|b| b.send).map(|b| b.note.id).collect();
+    let time = app.session.active_comp_id().map(|c| agent_time(app, c.0, app.session.time()));
+    let (pins, scope) = super::mentions::briefs(app);
+    let plan_mode = app.ui.merlin.mode == Mode::Plan;
+    let turn_ctx = TurnContext { time, notes: briefs, pins, plan_mode, current_plan: if plan_mode { current_plan(app) } else { None } };
     let panel = &mut app.ui.merlin;
+    let pin_labels: Vec<String> = std::mem::take(&mut panel.pins).into_iter().map(|p| if p.locked { format!("🔒 {}", p.label) } else { p.label }).collect();
+    panel.rt.mention_off = None;
+    for n in panel.notes.iter_mut().filter(|n| note_ids.contains(&n.id)) {
+        n.status = NoteStatus::Sent;
+    }
+    if note_ids.contains(&panel.editing_note.unwrap_or(0)) {
+        panel.editing_note = None;
+    }
     panel.input.clear();
     // Pictures first, then the words (what the providers recommend); failed chips are dropped.
     let mut parts = vec![];
@@ -184,8 +397,20 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     if !text.is_empty() {
         parts.push(Part::Text { text: text.clone() });
     }
-    let request = if text.is_empty() { sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ") } else { text.clone() };
-    panel.items.push(ChatItem::User { text, attachments: sent.into_iter().map(|a| a.path).collect() });
+    let request = if !text.is_empty() {
+        text.clone()
+    } else if !note_ids.is_empty() {
+        tr_args("Apply {} notes", &[&note_ids.len()])
+    } else {
+        sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+    };
+    panel.items.push(ChatItem::User {
+        text,
+        attachments: sent.into_iter().map(|a| a.path).collect(),
+        notes: note_ids,
+        pins: pin_labels,
+        checkpoint: Some(restore_id),
+    });
     let rt = &mut panel.rt;
     rt.next_turn = rt.next_turn.saturating_add(1);
     let turn = rt.next_turn;
@@ -217,12 +442,13 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
             rx.recv_timeout(REQUEST_TIMEOUT).map_err(|_| format!("{method}: the app didn't answer"))
         });
         let mut conversation = conversation;
-        let outcome = run_turn(
+        let outcome = run_turn_with(
             provider.as_ref(),
             &mut host,
             &cfg,
             &mut conversation,
             parts,
+            &turn_ctx,
             &mut |e| {
                 let _ = ev_tx.send(WorkerMsg::Event(e));
                 ctx_ev.request_repaint();
@@ -234,18 +460,20 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     });
     match spawned {
         Ok(_) => {
-            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None });
+            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None, scope, model });
             panel.busy = true;
         }
         Err(e) => notice(app, tr_args("Merlin couldn't start: {}", &[&e]), true),
     }
 }
 
-/// Whether the message can be sent: words or ready attachments, and no attachment still loading.
-pub(super) fn can_send(panel: &super::MerlinPanel) -> bool {
+/// Whether the message can be sent: words, ready attachments or notes to apply, and no attachment
+/// still loading.
+pub(super) fn can_send(app: &EffectcraftApp) -> bool {
+    let panel = &app.ui.merlin;
     let loading = panel.attachments.iter().any(|a| a.state == AttachState::Loading);
     let ready = panel.attachments.iter().any(|a| a.state == AttachState::Ready);
-    !loading && (ready || !panel.input.trim().is_empty())
+    !loading && (ready || !panel.input.trim().is_empty() || ready_notes(app) > 0)
 }
 
 // ------------------------------------------------------------------ attachments
@@ -295,9 +523,76 @@ pub fn attach_paths(app: &mut EffectcraftApp, ctx: &egui::Context, paths: Vec<St
     }
 }
 
-/// `ui.set {"merlin": {...}}` from the control channel: `attach` (absolute paths) attaches files
-/// as a drop would, for agents and scripts that can't drag.
+/// `ui.set {"merlin": {...}}` from the control channel, for agents and scripts that can't drag or
+/// click:
+/// * `attach`: absolute paths, attached as a drop would;
+/// * `note`: `{time, end?, text, layers?, region?}` (comp seconds, layer ids, `[x, y, w, h]` comp
+///   pixels) adds a note on the active comp, the selected layers unless `layers` is given;
+/// * `removeNote`: a note id;
+/// * `pin`: `{layer | frame | range | note, locked?}` (layer id, comp seconds, `[s, s]`, note id)
+///   pins the next message, as an `@` mention does;
+/// * `applyNotes`: `true` sends the typed message and the notes ready to apply.
 pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) -> Result<(), String> {
+    if let Some(n) = v.get("note") {
+        let secs = |k: &str| n.get(k).and_then(Value::as_f64).map(Tick::from_seconds_f64);
+        let start = secs("time").ok_or("merlin.note: `time` (comp seconds) is required")?;
+        let text = n.get("text").and_then(Value::as_str).unwrap_or_default();
+        let id = add_note(app, start, secs("end"), text).ok_or("merlin.note: no composition is open")?;
+        if let Some(note) = app.ui.merlin.notes.iter_mut().find(|x| x.id == id) {
+            if let Some(ls) = n.get("layers").and_then(Value::as_array) {
+                note.layers = ls.iter().filter_map(Value::as_u64).collect();
+            }
+            if let Some([x, y, w, h]) = n
+                .get("region")
+                .and_then(Value::as_array)
+                .and_then(|r| r.iter().map(|v| v.as_f64().map(|f| f as f32)).collect::<Option<Vec<_>>>())
+                .and_then(|r| <[f32; 4]>::try_from(r).ok())
+            {
+                note.region = Some([x, y, w, h]);
+            }
+        }
+    }
+    if let Some(p) = v.get("pin") {
+        let c = app.session.active_comp_id().ok_or("merlin.pin: no composition is open")?.0;
+        let secs = |v: &Value| v.as_f64().map(Tick::from_seconds_f64);
+        let kind = if let Some(id) = p.get("layer").and_then(Value::as_u64) {
+            super::PinKind::Layer { id }
+        } else if let Some(t) = p.get("frame").and_then(secs) {
+            super::PinKind::Frame { at: t }
+        } else if let Some([a, b]) = p.get("range").and_then(Value::as_array).map(Vec::as_slice) {
+            let (a, b) = (secs(a).ok_or("merlin.pin.range: seconds")?, secs(b).ok_or("merlin.pin.range: seconds")?);
+            super::PinKind::Range { start: a.min(b), end: a.max(b) }
+        } else if let Some(id) = p.get("note").and_then(Value::as_u64) {
+            super::PinKind::Note { id }
+        } else {
+            return Err("merlin.pin: give layer (id), frame (s), range ([s, s]) or note (id)".into());
+        };
+        let label = match &kind {
+            super::PinKind::Layer { id } => app
+                .session
+                .active_comp()
+                .and_then(|cp| cp.layer(effectcraft_engine::project::LayerId(*id)))
+                .map(|l| l.name.clone())
+                .ok_or("merlin.pin: no such layer")?,
+            super::PinKind::Frame { at } => display_time(app, c, *at),
+            super::PinKind::Range { start, end } => format!("{}–{}", display_time(app, c, *start), display_time(app, c, *end)),
+            super::PinKind::Note { id } => format!("Note {id}"),
+        };
+        let locked = p.get("locked").and_then(Value::as_bool).unwrap_or(kind.lockable());
+        super::mentions::add(app, super::Pin { comp: c, kind, label, locked });
+    }
+    if let Some(id) = v.get("removeNote").and_then(Value::as_u64) {
+        remove_note(app, id);
+    }
+    if v.get("applyNotes") == Some(&Value::Bool(true)) {
+        if app.ui.merlin.rt.worker.is_some() {
+            return Err("merlin.applyNotes: a turn is already running".into());
+        }
+        if !can_send(app) {
+            return Err("merlin.applyNotes: nothing to send (no written open notes or message)".into());
+        }
+        start_turn(app, ctx);
+    }
     let Some(list) = v.get("attach") else { return Ok(()) };
     let paths: Vec<String> =
         list.as_array().ok_or("merlin.attach: expected an array of absolute paths")?.iter().filter_map(Value::as_str).map(str::to_string).collect();
@@ -459,6 +754,22 @@ fn apply_event(app: &mut EffectcraftApp, e: AgentEvent) {
             }
         }
         AgentEvent::Usage(_) => {}
+        AgentEvent::PlanProposed { .. } => {}
+        AgentEvent::NoteFrame { id, png } => {
+            let key = format!("note-before:{id}");
+            panel.rt.textures.remove(&key);
+            panel.rt.frames.insert(key, vec![png]);
+        }
+        AgentEvent::NoteResolved { id, addressed, summary, frame } => {
+            if let Some(n) = panel.notes.iter_mut().find(|n| n.id == id) {
+                n.status = if addressed { NoteStatus::Addressed { summary } } else { NoteStatus::WontFix { summary } };
+            }
+            let key = format!("note-after:{id}");
+            panel.rt.textures.remove(&key);
+            if let Some(png) = frame {
+                panel.rt.frames.insert(key, vec![png]);
+            }
+        }
     }
 }
 
@@ -495,6 +806,7 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
         tool_calls: outcome.as_ref().map_or(w.tool_calls, |o| o.tool_calls),
         input_tokens: usage.total_input(),
         output_tokens: usage.output_tokens,
+        cost: merlin_agent::pricing::cost(&w.model, &usage),
     });
     if changed {
         panel.rt.checkpoints.push((w.turn, w.checkpoint));
@@ -503,6 +815,43 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
     }
     panel.rt.conversation = conversation.unwrap_or_default();
     panel.busy = false;
+    // Notes the turn never reported on can be applied again.
+    for n in panel.notes.iter_mut().filter(|n| n.status == NoteStatus::Sent) {
+        n.status = NoteStatus::Open;
+    }
+    for it in &mut panel.items {
+        if let ChatItem::Plan { state: s @ PlanState::Building, .. } = it {
+            *s = PlanState::Built;
+        }
+    }
+}
+
+/// Restore to here: put the project back as it was before the message at `item` (a jump in the
+/// branching history, so later work stays reachable in Window ▸ History).
+pub(super) fn restore(app: &mut EffectcraftApp, ctx: &egui::Context, item: usize) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let Some(ChatItem::User { checkpoint: Some(id), .. }) = app.ui.merlin.items.get(item).cloned() else { return };
+    match crate::menus::invoke(app, ctx, "edit.history.goto", json!({"id": id})) {
+        Ok(_) => notice(app, tr("Restored the project to before this message. Later work is still in Window ▸ History."), false),
+        Err(_) => notice(app, tr("That point is no longer in the undo history (it was trimmed, or the project was reopened)."), true),
+    }
+}
+
+/// The chat's approximate cost so far, when every priced turn's model is known.
+pub(super) fn chat_cost(panel: &super::MerlinPanel) -> (u64, u64, Option<f64>) {
+    let mut total = (0u64, 0u64, None::<f64>);
+    for it in &panel.items {
+        if let ChatItem::Turn { input_tokens, output_tokens, cost, .. } = it {
+            total.0 = total.0.saturating_add(*input_tokens);
+            total.1 = total.1.saturating_add(*output_tokens);
+            if let Some(c) = cost {
+                total.2 = Some(total.2.unwrap_or(0.0) + c);
+            }
+        }
+    }
+    total
 }
 
 pub(super) fn decide(app: &mut EffectcraftApp, ctx: &egui::Context, turn: u64, keep: bool) {
@@ -528,20 +877,47 @@ pub(super) fn decide(app: &mut EffectcraftApp, ctx: &egui::Context, turn: u64, k
     }
 }
 
+/// After an edit while pins are locked: undo it and answer with an error naming what went outside,
+/// or pass the reply through when it stayed inside.
+fn enforce(app: &mut EffectcraftApp, scope: &Scope, cp: &Checkpoint, reply: Value) -> Value {
+    let comp = scope.comp;
+    let when = |t: Tick| display_time(app, comp, t);
+    let out = guard::check(cp.snapshot(), &app.session.project, scope, &when);
+    if out.is_empty() {
+        return reply;
+    }
+    let undone = cp.discard(&mut app.session);
+    let mut msg = String::from("Refused: this edit went outside what the user pinned and locked, so ");
+    msg.push_str(if undone { "none of it was applied" } else { "it could not be undone automatically; tell the user" });
+    msg.push_str(":\n");
+    for o in &out {
+        msg.push_str(&format!("- {o}\n"));
+    }
+    msg.push_str("Make the change within the locked pins, or tell the user it needs them unlocked.");
+    json!({"ok": false, "error": msg})
+}
+
 /// Per frame (whether or not the panel is shown): run workers' tool requests on the UI thread and
 /// take in their progress.
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
     take_attachments(app, ctx);
+    sync_chat(app, now);
     if let Some((tx, rx)) = app.ui.merlin.rt.requests.take() {
         let mut reqs = std::mem::take(&mut app.ui.merlin.rt.deferred);
         while let Ok(r) = rx.try_recv() {
             reqs.push((r, now + 3.0));
         }
+        let scope = app.ui.merlin.rt.worker.as_ref().and_then(|w| w.scope.clone());
         for (req, deadline) in reqs {
             let reply = req.reply.clone();
+            let guarded = scope.as_ref().filter(|_| req.method == "engine.execute").map(|sc| (sc, Checkpoint::take(&app.session)));
             match control::handle(app, ctx, &req, now) {
                 Outcome::Done(v) => {
+                    let v = match guarded {
+                        Some((sc, cp)) if cp.changed(&app.session) => enforce(app, sc, &cp, v),
+                        _ => v,
+                    };
                     let _ = reply.send(v);
                 }
                 Outcome::Retry(_) if now < deadline => {
@@ -575,7 +951,10 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     }
     app.ui.merlin.rt.worker = Some(w);
     for e in events {
-        apply_event(app, e);
+        match e {
+            AgentEvent::PlanProposed { title, beats } => take_plan(app, title, beats),
+            e => apply_event(app, e),
+        }
     }
     let abandon = app.ui.merlin.rt.worker.as_ref().and_then(|w| w.stopping_since).is_some_and(|t| now - t > STOP_GRACE_SECS);
     if done.is_some() || abandon {
@@ -586,6 +965,187 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
         }
     } else if app.ui.merlin.rt.worker.as_ref().is_some_and(|w| w.stopping_since.is_some()) {
         ctx.request_repaint_after(Duration::from_millis(250));
+    }
+}
+
+// ------------------------------------------------------------------ saving with the project
+
+/// Saved next to the project as `<name>.merlin.json`: the chat as shown, the notes, the model
+/// conversation (with its images) and the notes' before / after frames.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SavedChat {
+    version: u32,
+    items: Vec<ChatItem>,
+    notes: Vec<Note>,
+    conversation: Vec<Message>,
+    /// PNG (base64) by frame key (`note-before:3`, `note-after:3`).
+    note_frames: std::collections::BTreeMap<String, String>,
+}
+
+fn chat_path(project: &str) -> std::path::PathBuf {
+    std::path::Path::new(project).with_extension("merlin.json")
+}
+
+fn fingerprint(panel: &super::MerlinPanel) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&(&panel.items, &panel.notes)).unwrap_or_default().hash(&mut h);
+    panel.rt.conversation.len().hash(&mut h);
+    h.finish()
+}
+
+/// Write the chat for `project` (in the background). An empty chat removes a saved one.
+fn save_chat(app: &mut EffectcraftApp, project: &str) {
+    let panel = &app.ui.merlin;
+    let path = chat_path(project);
+    if panel.items.is_empty() && panel.notes.is_empty() {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        return;
+    }
+    let note_frames = panel
+        .rt
+        .frames
+        .iter()
+        .filter(|(k, _)| k.starts_with("note-"))
+        .filter_map(|(k, v)| v.first().map(|png| (k.clone(), merlin_agent::base64::encode(png))))
+        .collect();
+    let saved = SavedChat { version: 1, items: panel.items.clone(), notes: panel.notes.clone(), conversation: panel.rt.conversation.clone(), note_frames };
+    let text = match serde_json::to_string(&saved) {
+        Ok(t) => t,
+        Err(e) => {
+            app.ui.status = format!("Merlin chat: {e}");
+            return;
+        }
+    };
+    let _ = std::thread::Builder::new().name("merlin-save".into()).spawn(move || {
+        let tmp = path.with_extension("merlin.json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    });
+}
+
+/// Start the panel over for another project (its notes, chat and conversation).
+fn reset_chat(app: &mut EffectcraftApp) {
+    let p = &mut app.ui.merlin;
+    p.items.clear();
+    p.notes.clear();
+    p.pins.clear();
+    p.editing_note = None;
+    p.marking_note = None;
+    p.rt.conversation.clear();
+    p.rt.checkpoints.clear();
+    p.rt.appear.clear();
+    p.rt.frames.retain(|k, _| k.starts_with("att:"));
+    p.rt.textures.clear();
+    p.rt.film = None;
+}
+
+/// Load the chat saved for `project`, if any.
+fn load_chat(app: &mut EffectcraftApp, project: &str) {
+    let Ok(text) = std::fs::read_to_string(chat_path(project)) else { return };
+    let Ok(saved) = serde_json::from_str::<SavedChat>(&text) else {
+        app.ui.status = tr("The saved Merlin chat for this project couldn't be read; starting a new one.").to_string();
+        return;
+    };
+    let p = &mut app.ui.merlin;
+    p.items = saved.items;
+    p.notes = saved.notes;
+    // Undo history isn't saved: past turns can't be reverted any more, notes in flight reopen.
+    for it in &mut p.items {
+        match it {
+            ChatItem::Turn { decision: d @ Decision::Pending, .. } => *d = Decision::Kept,
+            ChatItem::Plan { state: s @ PlanState::Building, .. } => *s = PlanState::Built,
+            ChatItem::Tool { state: s @ (ToolState::Pending | ToolState::Running), .. } => *s = ToolState::Failed,
+            _ => {}
+        }
+    }
+    for n in p.notes.iter_mut().filter(|n| n.status == NoteStatus::Sent) {
+        n.status = NoteStatus::Open;
+    }
+    for (k, b64) in saved.note_frames {
+        if let Some(png) = merlin_agent::base64::decode(&b64) {
+            p.rt.frames.insert(k, vec![png]);
+        }
+    }
+    // The chat's thumbnails come back from the conversation: tool calls' frames, attachments.
+    for m in &saved.conversation {
+        for part in &m.parts {
+            match part {
+                Part::ToolResult { call_id, content, .. } => {
+                    let pngs: Vec<Vec<u8>> = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            merlin_agent::ResultPart::Image { image } => merlin_agent::base64::decode(&image.data),
+                            merlin_agent::ResultPart::Text { .. } => None,
+                        })
+                        .collect();
+                    if !pngs.is_empty() {
+                        p.rt.frames.insert(call_id.clone(), pngs);
+                    }
+                }
+                Part::Image { image, label: Some(label) } => {
+                    if let (Some((_, path)), Some(png)) = (label.split_once(" at path "), merlin_agent::base64::decode(&image.data)) {
+                        let path = path.split(';').next().unwrap_or(path);
+                        p.rt.frames.insert(format!("att:{path}"), vec![png]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    p.rt.conversation = saved.conversation;
+    p.rt.saved_fingerprint = fingerprint(p);
+}
+
+/// Keep the chat with its project: load it when another project opens, save it as it changes.
+fn sync_chat(app: &mut EffectcraftApp, now: f64) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let path = app.session.path.clone().filter(|p| !p.is_empty());
+    let ptr = Arc::as_ptr(&app.session.project) as usize;
+    let prev = app.ui.merlin.rt.chat_for.clone();
+    match prev {
+        None => {
+            if let Some(p) = &path {
+                load_chat(app, p);
+            }
+            app.ui.merlin.rt.chat_for = Some(path);
+        }
+        Some(old) if old != path => {
+            // Save As keeps the document (and the chat); opening or starting another one doesn't.
+            let same_document = app.ui.merlin.rt.seen_project == ptr;
+            if !same_document {
+                if let Some(o) = &old
+                    && fingerprint(&app.ui.merlin) != app.ui.merlin.rt.saved_fingerprint
+                {
+                    save_chat(app, o);
+                }
+                reset_chat(app);
+                if let Some(p) = &path {
+                    load_chat(app, p);
+                }
+            }
+            app.ui.merlin.rt.saved_fingerprint = if same_document { 0 } else { fingerprint(&app.ui.merlin) };
+            app.ui.merlin.rt.chat_for = Some(path);
+        }
+        Some(_) => {}
+    }
+    app.ui.merlin.rt.seen_project = ptr;
+    // Save what changed, at most every two seconds.
+    if let Some(Some(p)) = app.ui.merlin.rt.chat_for.clone()
+        && now - app.ui.merlin.rt.last_save_check >= 2.0
+    {
+        app.ui.merlin.rt.last_save_check = now;
+        let fp = fingerprint(&app.ui.merlin);
+        if fp != app.ui.merlin.rt.saved_fingerprint {
+            app.ui.merlin.rt.saved_fingerprint = fp;
+            save_chat(app, &p);
+        }
     }
 }
 

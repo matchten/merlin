@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::markdown::{self, Block, Span};
 use super::native::{self, Runtime};
-use super::{AttachState, ChatItem, Decision, ToolState};
+use super::{AttachState, ChatItem, Decision, Mode, PlanState, ToolState};
 use crate::EffectcraftApp;
 use crate::i18n::{tr, tr_args};
 use crate::icons::{self, Icon};
@@ -46,16 +46,22 @@ enum Act {
     Attach,
     Unattach(usize),
     Suggest(usize),
+    PinFrame,
+    PinLayers,
+    BuildPlan(usize),
+    Restore(usize),
+    DiscardPlan(usize),
+    SetMode(Mode),
 }
 
 /// The panel's colours, derived from the theme so light and dark both work.
 #[derive(Clone, Copy)]
-struct Look {
-    t: Tokens,
+pub(super) struct Look {
+    pub(super) t: Tokens,
     /// Merlin's mark and accents (a soft violet).
-    magic: Color32,
-    card: Color32,
-    border: Color32,
+    pub(super) magic: Color32,
+    pub(super) card: Color32,
+    pub(super) border: Color32,
     code_bg: Color32,
 }
 
@@ -76,15 +82,24 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ui.painter().rect_filled(rect, 0.0, look.t.panel_bg);
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), 38.0));
     let chips = if app.ui.merlin.attachments.is_empty() { 0.0 } else { app.ui.merlin.rt.chips_h.max(CHIPS_H) + 2.0 };
-    let footer_h = (148.0 + chips).min(rect.height() * 0.6);
+    let pins = if app.ui.merlin.pins.is_empty() { 0.0 } else { app.ui.merlin.rt.pins_h.max(super::mentions::PIN_H) + 4.0 };
+    let footer_h = (148.0 + chips + pins).min(rect.height() * 0.6);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
-    let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
+    let middle = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
+    let strip_h = super::strip::height(app, middle.height());
+    let body = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.max.y - strip_h));
+    let strip = Rect::from_min_max(pos2(rect.min.x, body.max.y), middle.max);
     let mut acts = vec![];
     header_ui(app, ui, header, &look, now, &mut acts);
     if app.ui.merlin.settings_open {
-        settings_ui(app, ui, Rect::from_min_max(body.min, rect.max), &look, &mut acts);
+        settings_ui(app, ui, Rect::from_min_max(middle.min, rect.max), &look, &mut acts);
     } else {
-        log_ui(app, ui, body, &look, now, &mut acts);
+        if app.ui.merlin.marking_note.is_some() {
+            super::strip::mark_ui(app, ui, body, &look);
+        } else {
+            log_ui(app, ui, body, &look, now, &mut acts);
+        }
+        super::strip::show(app, ui, strip, &look);
         composer_ui(app, ui, footer, &look, now, &mut acts);
     }
     if std::mem::take(&mut app.ui.merlin.rt.drop_hover) {
@@ -116,6 +131,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
             Act::SaveKey | Act::RemoveKey => native::save_or_remove_key(app, matches!(a, Act::SaveKey)),
+            Act::BuildPlan(i) => native::build_plan(app, &ctx, i),
+            Act::Restore(i) => native::restore(app, &ctx, i),
+            Act::DiscardPlan(i) => native::discard_plan(app, i),
+            Act::SetMode(m) => app.ui.merlin.mode = m,
+            Act::PinFrame => super::mentions::pin_current_frame(app),
+            Act::PinLayers => super::mentions::pin_selected_layers(app),
         }
     }
 }
@@ -124,7 +145,7 @@ fn input_id() -> egui::Id {
     egui::Id::unique("merlin-input")
 }
 
-fn child(ui: &mut egui::Ui, r: Rect) -> egui::Ui {
+pub(super) fn child(ui: &mut egui::Ui, r: Rect) -> egui::Ui {
     ui.new_child(egui::UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Min)))
 }
 
@@ -167,13 +188,13 @@ fn shimmer(ui: &mut egui::Ui, text: &str, size: f32, look: &Look, now: f64) {
     ui.ctx().request_repaint();
 }
 
-fn lerp(a: Color32, b: Color32, k: f32) -> Color32 {
+pub(super) fn lerp(a: Color32, b: Color32, k: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round().clamp(0.0, 255.0) as u8;
     Color32::from_rgba_unmultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }
 
 /// A rounded icon button; `on` draws it highlighted.
-fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
+pub(super) fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
     let resp = ui.interact(r, egui::Id::unique(("merlin-btn", id)), if enabled { Sense::click() } else { Sense::hover() });
     let t = &look.t;
     let hot = ui.ctx().animate_bool_with_time(resp.id, enabled && resp.hovered(), 0.12);
@@ -197,7 +218,7 @@ fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, loo
 }
 
 /// A pill button: `primary` is filled with the accent, else outlined.
-fn pill(ui: &mut egui::Ui, label: &str, primary: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
+pub(super) fn pill(ui: &mut egui::Ui, label: &str, primary: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
     let t = &look.t;
     let galley = ui.painter().layout_no_wrap(label.to_string(), Tokens::medium(12.0), Color32::WHITE);
     let size = vec2(galley.size().x + 26.0, 26.0);
@@ -274,7 +295,15 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if resp.on_hover_text(tr("Change the provider or model")).clicked() {
+        let (tin, tout, cost) = native::chat_cost(&app.ui.merlin);
+        let mut tip = tr("Change the provider or model").to_string();
+        if tin + tout > 0 {
+            tip.push_str(&format!("\n{}", tr_args("This chat: {} in · {} out", &[&tokens(tin), &tokens(tout)])));
+            if let Some(c) = cost {
+                tip.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
+            }
+        }
+        if resp.on_hover_text(tip).clicked() {
             acts.push(Act::ToggleSettings);
         }
     }
@@ -317,9 +346,9 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     });
                 }
                 match item {
-                    ChatItem::User { text, attachments } => {
+                    ChatItem::User { text, attachments, notes, pins, checkpoint } => {
                         ui.add_space(4.0);
-                        egui::Frame::new()
+                        let card = egui::Frame::new()
                             .fill(look.card)
                             .stroke(Stroke::new(1.0, look.border))
                             .corner_radius(CornerRadius::same(10))
@@ -330,10 +359,42 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                                     let keys: Vec<String> = attachments.iter().map(|p| format!("att:{p}")).collect();
                                     thumbnails(ui, &ctx, &mut panel.rt, &keys, 72.0);
                                 }
+                                if !notes.is_empty() {
+                                    let n = notes.len();
+                                    ui.horizontal(|ui| {
+                                        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                                        icons::paint(ui.painter(), r, Icon::Chat, Color32::from_rgb(0xff, 0xb8, 0x00));
+                                        let what =
+                                            if n == 1 { tr("Applied 1 storyboard note").to_string() } else { tr_args("Applied {} storyboard notes", &[&n]) };
+                                        ui.label(RichText::new(what).font(Tokens::medium(11.5)).color(t.text_dim));
+                                    });
+                                }
+                                if !pins.is_empty() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for p in pins {
+                                            ui.label(
+                                                RichText::new(format!("@{p}"))
+                                                    .font(Tokens::medium(11.5))
+                                                    .color(look.magic)
+                                                    .background_color(look.magic.gamma_multiply(0.12)),
+                                            );
+                                        }
+                                    });
+                                }
                                 if !text.is_empty() {
                                     ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(BODY)).color(t.text)).wrap());
                                 }
                             });
+                        // Restore to here (not while a turn runs).
+                        let r = card.response.rect;
+                        if checkpoint.is_some() && !busy {
+                            let br = Rect::from_min_size(pos2(r.max.x - 26.0, r.min.y + 4.0), vec2(22.0, 22.0));
+                            let resp = icon_btn(ui, br, Icon::StepBack, false, true, look, &format!("restore-{i}"));
+                            auto.add(&format!("merlin.item.{i}.restore"), br, "Restore to here");
+                            if resp.on_hover_text(tr("Restore to here: put the project back as it was before this message")).clicked() {
+                                acts.push(Act::Restore(i));
+                            }
+                        }
                     }
                     ChatItem::Assistant { text } => markdown_ui(ui, text, look),
                     ChatItem::Thinking { text, open } => {
@@ -361,12 +422,28 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     ChatItem::Tool { id, name, input, state, summary, frames, open } => {
                         tool_card(ui, &ctx, &mut panel.rt, auto, acts, look, i, (id, name, input, *state, summary, *frames, *open));
                     }
-                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens } => {
+                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost } => {
                         ui.add_space(2.0);
-                        turn_card(ui, auto, acts, look, &latest, (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens));
+                        turn_card(ui, auto, acts, look, &latest, (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens, *cost));
                         ui.add_space(6.0);
                     }
                     ChatItem::Notice { text, error } => notice_ui(ui, text, *error, look),
+                    ChatItem::Plan { title, beats, state } => {
+                        let rows: Vec<(String, String)> = beats
+                            .iter()
+                            .filter_map(|id| panel.notes.iter().find(|n| n.id == *id))
+                            .map(|n| {
+                                let comp = session.project.comp(effectcraft_engine::project::ItemId(n.comp));
+                                let at = |t| comp.map(|c| crate::panels::timecode(session, c, t)).unwrap_or_default();
+                                let when = match n.end {
+                                    Some(e) => format!("{} – {}", at(n.start), at(e)),
+                                    None => at(n.start),
+                                };
+                                (when, n.text.clone())
+                            })
+                            .collect();
+                        plan_card(ui, auto, acts, look, i, title, &rows, *state, busy);
+                    }
                 }
             });
             after_user = is_user;
@@ -544,6 +621,12 @@ fn tool_title(name: &str, state: ToolState, input: &str, frames: usize) -> (Icon
         "add_effect" => (Icon::Fx, pick(tr("Adding an effect…"), tr_args("Added {}", &[&arg("effect").unwrap_or_else(|| tr("an effect").into())]))),
         "list_effects" | "list_fonts" | "list_commands" | "describe_command" => (Icon::Search, pick(tr("Looking things up…"), tr("Looked things up").into())),
         "import_file" => (Icon::Image, pick(tr("Importing a file…"), tr("Imported a file").into())),
+        "propose_plan" => (Icon::Flowchart, pick(tr("Writing a plan…"), tr("Proposed a plan").into())),
+        "resolve_note" => {
+            let id = serde_json::from_str::<Value>(input).ok().and_then(|v| v.get("id").and_then(Value::as_u64)).unwrap_or(0);
+            let declined = input.contains("wont_fix");
+            (Icon::Chat, pick(tr("Resolving a note…"), if declined { tr_args("Declined note {}", &[&id]) } else { tr_args("Resolved note {}", &[&id]) }))
+        }
         other => (Icon::Gear, other.to_string()),
     }
 }
@@ -637,10 +720,13 @@ fn turn_card(
     acts: &mut Vec<Act>,
     look: &Look,
     latest: &[u64],
-    (id, label, outcome, decision, tool_calls, input_tokens, output_tokens): (u64, &String, &String, Decision, usize, u64, u64),
+    (id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost): (u64, &String, &String, Decision, usize, u64, u64, Option<f64>),
 ) {
     let t = look.t;
-    let stats = tr_args("{} tool calls · {} in · {} out", &[&tool_calls, &tokens(input_tokens), &tokens(output_tokens)]);
+    let mut stats = tr_args("{} tool calls · {} in · {} out", &[&tool_calls, &tokens(input_tokens), &tokens(output_tokens)]);
+    if let Some(c) = cost {
+        stats.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
+    }
     if decision != Decision::Pending {
         // Decided: one quiet line.
         let what = match decision {
@@ -719,7 +805,7 @@ fn tokens(n: u64) -> String {
 }
 
 /// The textures of the images under `key` in [`Runtime::frames`], made on first use.
-fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
+pub(super) fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
     if !rt.textures.contains_key(key) {
         let texs: Vec<egui::TextureHandle> = rt
             .frames
@@ -771,18 +857,101 @@ fn drop_hint(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, look: &Look) {
     app.auto.add("merlin.dropTarget", rect, label);
 }
 
+/// A proposed plan: its beats (time, what happens) and Build / Discard.
+#[allow(clippy::too_many_arguments)]
+fn plan_card(
+    ui: &mut egui::Ui,
+    auto: &mut crate::automation::Registry,
+    acts: &mut Vec<Act>,
+    look: &Look,
+    i: usize,
+    title: &str,
+    rows: &[(String, String)],
+    state: PlanState,
+    busy: bool,
+) {
+    let t = look.t;
+    let live = state == PlanState::Proposed;
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(look.card)
+        .stroke(Stroke::new(1.0, if live { look.magic.gamma_multiply(0.7) } else { look.border }))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icons::paint(ui.painter(), r, Icon::Flowchart, look.magic);
+                ui.label(RichText::new(tr("Plan")).font(Tokens::semibold(11.0)).color(look.magic));
+                ui.label(RichText::new(title).font(Tokens::semibold(13.0)).color(t.text));
+            });
+            ui.add_space(4.0);
+            if rows.is_empty() {
+                ui.label(RichText::new(tr("Its beats were removed from the storyboard.")).font(Tokens::ui(11.5)).color(t.text_faint));
+            }
+            for (k, (when, text)) in rows.iter().enumerate() {
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(format!("{}", k + 1)).font(Tokens::semibold(11.5)).color(look.magic));
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(when).font(Tokens::medium(11.0)).color(t.text_dim));
+                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(12.5)).color(t.text)).wrap());
+                    });
+                });
+            }
+            ui.add_space(6.0);
+            match state {
+                PlanState::Proposed => {
+                    ui.label(RichText::new(tr("Edit the beats on the storyboard, ask for changes, or build it.")).font(Tokens::ui(11.0)).color(t.text_faint));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let b = pill(ui, tr("Build it"), true, !busy, look, &format!("plan-build-{i}"));
+                        auto.add(&format!("merlin.plan.{i}.build"), b.rect, "Build it");
+                        if b.clicked() {
+                            acts.push(Act::BuildPlan(i));
+                        }
+                        let d = pill(ui, tr("Discard"), false, !busy, look, &format!("plan-discard-{i}"));
+                        auto.add(&format!("merlin.plan.{i}.discard"), d.rect, "Discard plan");
+                        if d.clicked() {
+                            acts.push(Act::DiscardPlan(i));
+                        }
+                    });
+                }
+                PlanState::Building => {
+                    ui.label(RichText::new(tr("Building…")).font(Tokens::medium(11.5)).color(look.magic));
+                }
+                PlanState::Built => {
+                    ui.label(RichText::new(tr("✓ Built")).font(Tokens::medium(11.5)).color(t.text_dim));
+                }
+                PlanState::Discarded => {
+                    ui.label(RichText::new(tr("Discarded")).font(Tokens::medium(11.5)).color(t.text_faint));
+                }
+                PlanState::Revised => {
+                    ui.label(RichText::new(tr("Replaced by a newer plan")).font(Tokens::medium(11.5)).color(t.text_faint));
+                }
+            }
+        });
+    ui.add_space(4.0);
+}
+
 // ------------------------------------------------------------------ composer
 
 fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now: f64, acts: &mut Vec<Act>) {
     let t = look.t;
     let busy = app.ui.merlin.busy;
-    let inner = r.shrink2(vec2(10.0, 8.0));
+    let mut inner = r.shrink2(vec2(10.0, 8.0));
 
-    // The context Merlin will see, as quiet chips.
-    context_chips(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), 18.0)), look);
+    // What the message is pinned to, then the context Merlin will see, as quiet chips.
+    if !app.ui.merlin.pins.is_empty() {
+        let h = super::mentions::pins_ui(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), super::mentions::PIN_H)), look);
+        inner.min.y += h + 4.0;
+    }
+    context_chips(app, ui, Rect::from_min_size(inner.min, vec2(inner.width(), 18.0)), look, acts);
 
     let boxr = Rect::from_min_max(pos2(inner.min.x, inner.min.y + 24.0), inner.max);
     let focused = ui.ctx().memory(|m| m.has_focus(input_id()));
+    // The @ list takes the arrow keys and Enter while it shows.
+    let mentioning = super::mentions::keys(app, ui, focused);
     let f = ui.ctx().animate_bool_with_time(egui::Id::unique("merlin-composer-focus"), focused, 0.18);
     ui.painter().rect_filled(boxr, 12.0, look.card);
     ui.painter().rect_stroke(boxr, 12.0, Stroke::new(1.0 + 0.5 * f, lerp(look.border, look.magic.gamma_multiply(0.8), f)), StrokeKind::Inside);
@@ -796,7 +965,7 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     let text_r = Rect::from_min_max(pos2(boxr.min.x + 10.0, top), pos2(boxr.max.x - 10.0, boxr.max.y - bar_h - 2.0));
 
     // Enter sends, Shift+Enter starts a new line.
-    if !busy && focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+    if !busy && focused && !mentioning && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
         acts.push(Act::Send);
     }
     let mut c = child(ui, text_r);
@@ -807,9 +976,12 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         .font(Tokens::ui(BODY))
         .desired_width(text_r.width())
         .desired_rows(2)
-        .hint_text(RichText::new(tr("Ask Merlin to make something…")).color(t.text_faint));
+        .hint_text(RichText::new(tr("Ask Merlin… type @ to pin a layer or time")).color(t.text_faint));
     let resp = c.add(te);
     app.auto.add_response("merlin.input", &resp, "Message Merlin");
+    if mentioning {
+        super::mentions::popup_ui(app, ui, boxr, look);
+    }
 
     // Bottom bar: attach, a hint, send / stop.
     let bar = Rect::from_min_max(pos2(boxr.min.x + 6.0, boxr.max.y - bar_h - 2.0), pos2(boxr.max.x - 6.0, boxr.max.y - 4.0));
@@ -819,17 +991,39 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     if a.on_hover_text(tr("Attach images, Photoshop, SVG, PDF or Illustrator files (or drag them onto this panel)")).clicked() {
         acts.push(Act::Attach);
     }
-    if bar.width() > 230.0 {
-        ui.painter().text(
-            pos2(attach.max.x + 6.0, bar.center().y),
-            Align2::LEFT_CENTER,
-            tr("Enter to send · Shift+Enter for a new line"),
-            Tokens::ui(10.5),
-            t.text_faint,
-        );
+    // Act | Plan.
+    let mode = app.ui.merlin.mode;
+    let seg_w = 40.0;
+    let seg = Rect::from_min_size(pos2(attach.max.x + 6.0, bar.center().y - 11.0), vec2(seg_w * 2.0, 22.0));
+    ui.painter().rect_filled(seg, 11.0, t.app_bg);
+    for (k, (m, label, id, tip)) in [
+        (Mode::Act, tr("Act"), "merlin.mode.act", tr("Act: Merlin builds right away")),
+        (Mode::Plan, tr("Plan"), "merlin.mode.plan", tr("Plan: Merlin only looks, then proposes timed beats for you to edit and build")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = Rect::from_min_size(pos2(seg.min.x + k as f32 * seg_w, seg.min.y), vec2(seg_w, 22.0));
+        let resp = ui.interact(r, egui::Id::unique(("merlin-mode", k)), if busy { Sense::hover() } else { Sense::click() });
+        let on = mode == m;
+        if on {
+            ui.painter().rect_filled(r.shrink(2.0), 9.0, if m == Mode::Plan { look.magic.gamma_multiply(0.3) } else { t.hover });
+        }
+        let col = if on { if m == Mode::Plan { look.magic } else { t.text } } else { t.text_faint };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, Tokens::medium(11.0), col);
+        app.auto.add(id, r, tip);
+        if resp.on_hover_text(tip).clicked() {
+            acts.push(Act::SetMode(m));
+        }
+    }
+    // A hint, when it fits before the send button.
+    let hint = if mode == Mode::Plan { tr("Merlin plans; nothing is built yet") } else { tr("Enter to send · Shift+Enter for a new line") };
+    let g = ui.painter().layout_no_wrap(hint.to_string(), Tokens::ui(10.5), t.text_faint);
+    if seg.max.x + 8.0 + g.size().x < bar.max.x - 34.0 {
+        ui.painter().galley(pos2(seg.max.x + 8.0, bar.center().y - g.size().y / 2.0), g, t.text_faint);
     }
     let send = Rect::from_center_size(pos2(bar.max.x - 14.0, bar.center().y), vec2(26.0, 26.0));
-    let enabled = busy || native::can_send(&app.ui.merlin);
+    let enabled = busy || native::can_send(app);
     let sresp = ui.interact(send, egui::Id::unique("merlin-send"), if enabled { Sense::click() } else { Sense::hover() });
     let hot = ui.ctx().animate_bool_with_time(sresp.id, enabled && sresp.hovered(), 0.12);
     let p = ui.painter();
@@ -859,40 +1053,59 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     }
 }
 
-/// The active comp, selected layers and time, as small chips.
-fn context_chips(app: &EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look) {
+/// The active comp, selected layers and time, as small chips; clicking the layers or the time pins
+/// them to the message.
+fn context_chips(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, acts: &mut Vec<Act>) {
     let t = look.t;
     let p = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
     let mut x = r.min.x;
     let cy = r.center().y;
-    let chip = |icon: Icon, text: String, x: &mut f32| {
-        let g = p.layout_no_wrap(text, Tokens::ui(11.0), t.text_faint);
+    let chip = |icon: Icon, text: String, x: &mut f32, hot: bool| {
+        let col = if hot { t.text } else { t.text_faint };
+        let g = p.layout_no_wrap(text, Tokens::ui(11.0), col);
         let w = g.size().x + 26.0;
         let cr = Rect::from_min_size(pos2(*x, cy - 9.0), vec2(w, 18.0));
-        p.rect_filled(cr, 9.0, t.hover.gamma_multiply(0.6));
-        icons::paint(&p, Rect::from_center_size(pos2(cr.min.x + 10.0, cy), vec2(10.0, 10.0)), icon, t.text_faint);
-        p.galley(pos2(cr.min.x + 18.0, cy - g.size().y / 2.0), g, t.text_faint);
+        p.rect_filled(cr, 9.0, if hot { t.hover } else { t.hover.gamma_multiply(0.6) });
+        icons::paint(&p, Rect::from_center_size(pos2(cr.min.x + 10.0, cy), vec2(10.0, 10.0)), icon, col);
+        p.galley(pos2(cr.min.x + 18.0, cy - g.size().y / 2.0), g, col);
         *x += w + 4.0;
+        cr
     };
+    let hovered = |id: &str| ui.ctx().read_response(egui::Id::unique(("merlin-ctx", id))).is_some_and(|r| r.hovered());
+    let (hot_layers, hot_time) = (hovered("layers"), hovered("time"));
     let s = &app.session;
+    let mut clickable = vec![];
     match s.active_comp() {
-        None => chip(Icon::Comp, tr("No composition").to_string(), &mut x),
+        None => {
+            chip(Icon::Comp, tr("No composition").to_string(), &mut x, false);
+        }
         Some(comp) => {
             let name = s.active_comp_id().and_then(|id| s.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
-            chip(Icon::Comp, short(&name, 22), &mut x);
+            chip(Icon::Comp, short(&name, 22), &mut x, false);
             let sel = &s.state.selected_layers;
             let names: Vec<String> = comp.layers.iter().filter(|l| sel.contains(&l.id)).map(|l| l.name.clone()).collect();
-            match names.as_slice() {
-                [] => {}
-                [one] => chip(Icon::TextLayer, short(one, 22), &mut x),
-                _ => chip(Icon::TextLayer, tr_args("{} layers", &[&names.len()]), &mut x),
+            let layers = match names.as_slice() {
+                [] => None,
+                [one] => Some(chip(Icon::TextLayer, short(one, 22), &mut x, hot_layers)),
+                _ => Some(chip(Icon::TextLayer, tr_args("{} layers", &[&names.len()]), &mut x, hot_layers)),
+            };
+            if let Some(cr) = layers {
+                clickable.push(("layers", cr, tr("Pin the selected layers to your message (locked: Merlin edits only them)"), Act::PinLayers));
             }
-            chip(Icon::Stopwatch, format!("{:.2}s", s.time().seconds()), &mut x);
+            let cr = chip(Icon::Stopwatch, crate::panels::timecode(s, comp, s.time()), &mut x, hot_time);
+            clickable.push(("time", cr, tr("Pin this frame to your message (or type @)"), Act::PinFrame));
+        }
+    }
+    for (id, cr, tip, act) in clickable {
+        let resp = ui.interact(cr, egui::Id::unique(("merlin-ctx", id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        app.auto.add(&format!("merlin.context.{id}"), cr, tip);
+        if resp.on_hover_text(tip).clicked() {
+            acts.push(act);
         }
     }
 }
 
-fn short(s: &str, n: usize) -> String {
+pub(super) fn short(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) } else { s.to_string() }
 }
 

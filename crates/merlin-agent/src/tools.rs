@@ -18,11 +18,11 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
-    fn json(v: Value) -> ToolOutput {
+    pub(crate) fn json(v: Value) -> ToolOutput {
         ToolOutput { content: vec![ResultPart::Text { text: compact(&v) }], is_error: false, frames: vec![] }
     }
 
-    fn error(msg: impl Into<String>) -> ToolOutput {
+    pub(crate) fn error(msg: impl Into<String>) -> ToolOutput {
         ToolOutput { content: vec![ResultPart::Text { text: msg.into() }], is_error: true, frames: vec![] }
     }
 
@@ -171,7 +171,61 @@ pub fn specs() -> Vec<ToolSpec> {
             description: "Import a file (image, video, audio, .ai, .svg, .pdf, .psd) into the project, e.g. one the user attached; returns the new item. Pass `addToComp` to also place it as a layer in the active comp.",
             input_schema: schema(json!({"path": {"type": "string", "description": "Absolute path."}, "addToComp": {"type": "boolean"}}), &["path"]),
         },
+        ToolSpec {
+            name: RESOLVE_NOTE,
+            description: "Report one of the user's timeline notes (the <notes> block) as handled, after fixing it and re-rendering its frame to check; or as won't fix, saying why. The user sees each note's status and its frame before and after.",
+            input_schema: schema(
+                json!({
+                    "id": {"type": "integer", "description": "The note's id from the <notes> block."},
+                    "status": {"type": "string", "enum": ["addressed", "wont_fix"]},
+                    "summary": {"type": "string", "description": "One sentence: what changed (or why not)."}
+                }),
+                &["id", "status", "summary"],
+            ),
+        },
     ]
+}
+
+/// The tool that reports a note done; the turn loop runs it (it talks to the panel, not the engine).
+pub const RESOLVE_NOTE: &str = "resolve_note";
+/// Plan mode's answer: the beats of a plan, shown to the user to edit and approve.
+pub const PROPOSE_PLAN: &str = "propose_plan";
+
+/// Tools that only read (plan mode offers just these, and [`PROPOSE_PLAN`]).
+pub fn is_read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_commands" | "describe_command" | "get_project" | "get_comp" | "get_layer" | "get_property" | "list_effects" | "list_fonts" | "render_frames"
+    )
+}
+
+/// The plan-mode catalogue: the read-only tools and [`PROPOSE_PLAN`].
+pub fn plan_specs() -> Vec<ToolSpec> {
+    let mut v: Vec<ToolSpec> = specs().into_iter().filter(|t| is_read_only(t.name)).collect();
+    v.push(ToolSpec {
+        name: PROPOSE_PLAN,
+        description: "Plan mode: propose the piece as a sequence of timed beats for the user to review, edit and approve before anything is built. Each beat covers a comp-time range and says what happens then (which layers, what motion, easing, colour). Cover the whole piece in order. Keep each beat to one or two short sentences a motion designer can scan. Call it once, then stop.",
+        input_schema: schema(
+            json!({
+                "title": {"type": "string", "description": "A short name for the plan."},
+                "beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {"type": "number", "description": "Comp seconds."},
+                            "end": {"type": "number", "description": "Comp seconds."},
+                            "text": {"type": "string", "description": "What happens in this beat."},
+                            "layers": {"type": "array", "items": {"type": "string"}, "description": "Names of the layers involved (existing or to create)."}
+                        },
+                        "required": ["start", "end", "text"]
+                    }
+                }
+            }),
+            &["title", "beats"],
+        ),
+    });
+    v
 }
 
 /// Most frames one `render_frames` call returns (each is input tokens for the model).
@@ -209,6 +263,8 @@ pub fn run(host: &mut dyn Host, name: &str, input: &Value, frame_max_side: u32) 
         "list_fonts" => host.command("text.fonts", obj(&[("query", get(input, "query"))])).map(ToolOutput::json),
         "render_frames" => render_frames(host, input, frame_max_side),
         "import_file" => import_file(host, input),
+        RESOLVE_NOTE => Err("resolve_note only works during a turn that has notes".into()),
+        PROPOSE_PLAN => Err("propose_plan only works in plan mode".into()),
         other => Err(format!("unknown tool `{other}`")),
     };
     r.unwrap_or_else(ToolOutput::error)
