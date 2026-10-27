@@ -595,3 +595,45 @@ impl LlmProvider for Fixed2 {
         })
     }
 }
+
+#[test]
+fn the_style_kit_travels_and_remember_style_reports_additions() {
+    use merlin_agent::style::{Feel, StyleKit, Swatch, block};
+    use merlin_agent::{TurnContext, run_turn_with};
+    let p = merlin_agent::providers::demo::Demo { chunk_delay: std::time::Duration::ZERO };
+    let mut h = host();
+    let kit = StyleKit { name: "Ember".into(), palette: vec![Swatch { name: "Ember".into(), hex: "#F26B21".into() }], ..Default::default() };
+    let ctx = TurnContext { style: Some(block(&kit)), ..TurnContext::default() };
+    let mut conv = vec![];
+    let mut events = vec![];
+    let cfg = AgentConfig { provider: ProviderKind::Demo, ..Default::default() };
+    let out = run_turn_with(
+        &p,
+        &mut h,
+        &cfg,
+        &mut conv,
+        vec![Part::Text { text: "remember: logo bottom right".into() }],
+        &ctx,
+        &mut |e| events.push(e),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(out.end, TurnEnd::Done);
+    assert!(conv[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.starts_with("<style_kit name=\"Ember\">"))));
+    let u = events.iter().find_map(|e| if let AgentEvent::StyleRemembered(u) = e { Some(u.clone()) } else { None }).expect("remembered");
+    assert_eq!(u.colors[0].hex, "#F5C542");
+    assert_eq!(u.feel, Some(Feel::Snappy));
+    // Nothing to remember is an error the model can read; bad colours are dropped.
+    let mut ev = vec![];
+    run_turn_with(
+        &Fixed2("remember_style", json!({"colors": [{"hex": "nope"}]})),
+        &mut h,
+        &cfg,
+        &mut vec![],
+        vec![Part::Text { text: "x".into() }],
+        &ctx,
+        &mut |e| ev.push(e),
+        &AtomicBool::new(false),
+    );
+    assert!(ev.iter().any(|e| matches!(e, AgentEvent::ToolFinished { is_error: true, summary, .. } if summary.contains("nothing to remember"))));
+    assert!(tools::plan_specs().iter().any(|t| t.name == "remember_style"), "plan mode can remember too");
+}

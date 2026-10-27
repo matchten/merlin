@@ -135,6 +135,7 @@ fn run() -> Result<(), String> {
             }
             AgentEvent::Usage(u) => eprintln!("  [{} in ({} cached) · {} out]", u.total_input(), u.cache_read_tokens, u.output_tokens),
             AgentEvent::NoteFrame { .. } => {}
+            AgentEvent::StyleRemembered(u) => eprintln!("  remembered for the style kit: {u:?}"),
             AgentEvent::PlanProposed { title, beats } => {
                 eprintln!("  plan “{title}”:");
                 for b in beats {

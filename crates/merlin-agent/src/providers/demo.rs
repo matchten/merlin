@@ -35,7 +35,7 @@ fn attached(messages: &[Message], at: usize) -> Vec<String> {
 }
 
 /// Blocks the panel adds to a message (not the user's words).
-const CONTEXT_BLOCKS: [&str; 5] = ["<editor_context>", "<notes>", "<pins>", "<mode>", "<current_plan>"];
+const CONTEXT_BLOCKS: [&str; 6] = ["<editor_context>", "<notes>", "<pins>", "<mode>", "<current_plan>", "<style_kit"];
 
 /// Whether message `at` was sent in plan mode.
 fn plan_mode(messages: &[Message], at: usize) -> bool {
@@ -184,6 +184,18 @@ impl LlmProvider for Demo {
         let title: String = words.trim().chars().take(40).collect();
         let title = if title.is_empty() { "Merlin".to_string() } else { title };
         let id = |n: usize| format!("demo_{at}_{n}");
+        // "Remember …": save to the style kit, then confirm.
+        if words.to_lowercase().contains("remember") {
+            let (text, calls, stop) = match step {
+                0 => (
+                    "Demo mode (no model is called). Saving that to your style kit.".to_string(),
+                    vec![(id(1), "remember_style", json!({"colors": [{"name": "Demo Gold", "hex": "#F5C542"}], "feel": "snappy", "notes": words.trim()}))],
+                    StopReason::ToolUse,
+                ),
+                _ => ("Saved: it will come with every message from now on.".to_string(), vec![], StopReason::EndTurn),
+            };
+            return self.reply(text, calls, stop, on_event, cancel);
+        }
         if plan_mode(req.messages, at) {
             let (text, calls, stop) = match step {
                 0 => (

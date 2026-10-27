@@ -15,6 +15,7 @@
 //! * [`notes`]: requests pinned to a frame or range of a comp, applied as one turn.
 //! * [`guard`]: keeps edits inside the layers and time range the user pinned.
 //! * [`pricing`]: approximate turn cost from token usage and list prices.
+//! * [`style`]: style kits (palette, fonts, motion feel, brand notes) Merlin follows and adds to.
 //! * [`keys`]: API keys from environment variables or the OS keychain, never from preferences.
 //!
 //! Layering: depends on `effectcraft-engine`, `effectcraft-automation` (PNG encoding) and
@@ -36,6 +37,7 @@ pub mod pricing;
 pub mod provider;
 pub mod providers;
 pub mod sse;
+pub mod style;
 pub mod tools;
 pub mod transport;
 

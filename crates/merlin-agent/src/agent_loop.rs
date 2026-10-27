@@ -46,6 +46,8 @@ pub enum AgentEvent {
         id: u64,
         png: Vec<u8>,
     },
+    /// The agent saved something to the user's style kit.
+    StyleRemembered(crate::style::StyleUpdate),
     /// Plan mode: the agent proposed a plan.
     PlanProposed {
         title: String,
@@ -73,6 +75,8 @@ pub struct TurnContext {
     pub plan_mode: bool,
     /// Plan mode: the current plan as the user may have edited it (a `<current_plan>` block).
     pub current_plan: Option<String>,
+    /// The active style kit's block ([`crate::style::block`]).
+    pub style: Option<String>,
 }
 
 /// One beat of a proposed plan.
@@ -148,6 +152,9 @@ pub fn run_turn_with(
     cancel: &AtomicBool,
 ) -> TurnOutcome {
     let mut parts = user;
+    if let Some(style) = &ctx.style {
+        parts.push(Part::Text { text: style.clone() });
+    }
     parts.extend(pin_parts(host, ctx, cfg.frame_max_side()));
     if ctx.plan_mode {
         if let Some(plan) = &ctx.current_plan {
@@ -205,7 +212,9 @@ pub fn run_turn_with(
                     continue;
                 }
                 on_event(AgentEvent::ToolRunning { id: id.clone(), name: name.clone(), input: input.clone() });
-                let out = if ctx.plan_mode && name != tools::PROPOSE_PLAN && !tools::is_read_only(&name) {
+                let out = if name == tools::REMEMBER_STYLE {
+                    remember_style(&input, on_event)
+                } else if ctx.plan_mode && name != tools::PROPOSE_PLAN && !tools::is_read_only(&name) {
                     ToolOutput::error(format!("`{name}` is off in plan mode: nothing can be edited yet. Propose the plan with propose_plan."))
                 } else if name == tools::PROPOSE_PLAN {
                     propose_plan(&input, ctx.plan_mode, on_event)
@@ -276,6 +285,39 @@ fn note_parts(host: &mut dyn Host, ctx: &TurnContext, max_side: u32, on_event: &
     }
     parts.push(Part::Text { text: notes::block(&ctx.notes) });
     parts
+}
+
+/// The `remember_style` tool: hand the additions to the panel, which merges them into the kit.
+fn remember_style(input: &Value, on_event: &mut dyn FnMut(AgentEvent)) -> ToolOutput {
+    use crate::style::{Feel, StyleUpdate, Swatch, parse_hex};
+    let strs = |k: &str| -> Vec<String> {
+        input.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+    };
+    let colors: Vec<Swatch> = input
+        .get("colors")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|c| {
+            let hex = c.get("hex").and_then(Value::as_str)?;
+            parse_hex(hex)?;
+            Some(Swatch { name: c.get("name").and_then(Value::as_str).unwrap_or_default().to_string(), hex: hex.to_string() })
+        })
+        .take(24)
+        .collect();
+    let u = StyleUpdate {
+        colors,
+        fonts: strs("fonts"),
+        feel: input.get("feel").and_then(Value::as_str).and_then(Feel::parse),
+        overshoot: input.get("overshoot").and_then(Value::as_f64).map(|o| o as f32),
+        notes: input.get("notes").and_then(Value::as_str).map(str::to_string),
+    };
+    if u == StyleUpdate::default() {
+        return ToolOutput::error("nothing to remember: give colors (with #rrggbb hex), fonts, feel, overshoot or notes");
+    }
+    on_event(AgentEvent::StyleRemembered(u));
+    ToolOutput::json(json!({"saved": true, "note": "Saved to the user's style kit; it comes with every message from now on."}))
 }
 
 /// The `propose_plan` tool: hand the beats to the panel.

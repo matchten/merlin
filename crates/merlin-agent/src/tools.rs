@@ -171,6 +171,7 @@ pub fn specs() -> Vec<ToolSpec> {
             description: "Import a file (image, video, audio, .ai, .svg, .pdf, .psd) into the project, e.g. one the user attached; returns the new item. Pass `addToComp` to also place it as a layer in the active comp.",
             input_schema: schema(json!({"path": {"type": "string", "description": "Absolute path."}, "addToComp": {"type": "boolean"}}), &["path"]),
         },
+        remember_style_spec(),
         ToolSpec {
             name: RESOLVE_NOTE,
             description: "Report one of the user's timeline notes (the <notes> block) as handled, after fixing it and re-rendering its frame to check; or as won't fix, saying why. The user sees each note's status and its frame before and after.",
@@ -188,6 +189,26 @@ pub fn specs() -> Vec<ToolSpec> {
 
 /// The tool that reports a note done; the turn loop runs it (it talks to the panel, not the engine).
 pub const RESOLVE_NOTE: &str = "resolve_note";
+/// Adds colours, fonts, motion feel or notes to the user's style kit (the turn loop runs it).
+pub const REMEMBER_STYLE: &str = "remember_style";
+
+fn remember_style_spec() -> ToolSpec {
+    ToolSpec {
+        name: REMEMBER_STYLE,
+        description: "Save to the user's style kit (sent as <style_kit> with every message) so they don't have to repeat it: colours, fonts, the motion feel, or a brand rule. Use it when the user asks you to remember something about their style, or to take a palette from a reference image (name each colour). Only add what the user wants kept.",
+        input_schema: schema(
+            json!({
+                "colors": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "hex": {"type": "string", "description": "#rrggbb"}}, "required": ["hex"]}},
+                "fonts": {"type": "array", "items": {"type": "string"}},
+                "feel": {"type": "string", "enum": ["smooth", "snappy", "bouncy", "linear"]},
+                "overshoot": {"type": "number", "description": "0 to 0.5: overshoot as a share of the move."},
+                "notes": {"type": "string", "description": "A rule to keep, in a sentence."}
+            }),
+            &[],
+        ),
+    }
+}
+
 /// Plan mode's answer: the beats of a plan, shown to the user to edit and approve.
 pub const PROPOSE_PLAN: &str = "propose_plan";
 
@@ -201,7 +222,7 @@ pub fn is_read_only(name: &str) -> bool {
 
 /// The plan-mode catalogue: the read-only tools and [`PROPOSE_PLAN`].
 pub fn plan_specs() -> Vec<ToolSpec> {
-    let mut v: Vec<ToolSpec> = specs().into_iter().filter(|t| is_read_only(t.name)).collect();
+    let mut v: Vec<ToolSpec> = specs().into_iter().filter(|t| is_read_only(t.name) || t.name == REMEMBER_STYLE).collect();
     v.push(ToolSpec {
         name: PROPOSE_PLAN,
         description: "Plan mode: propose the piece as a sequence of timed beats for the user to review, edit and approve before anything is built. Each beat covers a comp-time range and says what happens then (which layers, what motion, easing, colour). Cover the whole piece in order. Keep each beat to one or two short sentences a motion designer can scan. Call it once, then stop.",
@@ -265,6 +286,7 @@ pub fn run(host: &mut dyn Host, name: &str, input: &Value, frame_max_side: u32) 
         "import_file" => import_file(host, input),
         RESOLVE_NOTE => Err("resolve_note only works during a turn that has notes".into()),
         PROPOSE_PLAN => Err("propose_plan only works in plan mode".into()),
+        REMEMBER_STYLE => Err("remember_style only works in the Merlin panel".into()),
         other => Err(format!("unknown tool `{other}`")),
     };
     r.unwrap_or_else(ToolOutput::error)
