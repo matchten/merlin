@@ -54,6 +54,9 @@ pub struct Note {
     /// Layers it is about (ids).
     #[serde(default)]
     pub layers: Vec<u64>,
+    /// Properties it is about, as shown (`Title ▸ Position`).
+    #[serde(default)]
+    pub props: Vec<String>,
     /// An area of the frame it is about: `[x, y, w, h]` in comp pixels.
     #[serde(default)]
     pub region: Option<[f32; 4]>,
@@ -104,6 +107,9 @@ pub fn block(briefs: &[NoteBrief]) -> String {
         out.push_str(&format!("- Note {}{beat} {when}", n.id));
         if !b.layers.is_empty() {
             out.push_str(&format!(", about {}", b.layers.join(", ")));
+        }
+        if !n.props.is_empty() {
+            out.push_str(&format!(" (properties: {})", n.props.join(", ")));
         }
         if let Some([x, y, w, h]) = n.region {
             out.push_str(&format!(", the area x {x:.0}–{:.0}, y {y:.0}–{:.0} px (outlined in its frame)", x + w, y + h));
@@ -179,12 +185,13 @@ mod tests {
         ranged.until = Some(time_label("0:00:02:00", 60, 2.0));
         ranged.layers = vec!["\"Title\" (id 7)".into()];
         ranged.note.region = Some([100.0, 50.0, 200.0, 80.0]);
+        ranged.note.props = vec!["Title ▸ Position".into()];
         let s = block(&[brief(1, true), ranged, brief(3, false)]);
         assert!(s.starts_with("<notes>\n") && s.ends_with("</notes>"));
         assert!(s.contains("- Note 1 at 0:00:01:12 (frame 42, 1.400 s): note 1 text\n"), "{s}");
         assert!(
             s.contains(
-                "- Note 2 from 0:00:01:12 (frame 42, 1.400 s) to 0:00:02:00 (frame 60, 2.000 s), about \"Title\" (id 7), the area x 100–300, y 50–130 px"
+                "- Note 2 from 0:00:01:12 (frame 42, 1.400 s) to 0:00:02:00 (frame 60, 2.000 s), about \"Title\" (id 7) (properties: Title ▸ Position), the area x 100–300, y 50–130 px"
             ),
             "{s}"
         );
