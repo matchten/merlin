@@ -101,13 +101,15 @@ pub(crate) struct Runtime {
     pub(super) chip_appear: HashMap<String, f64>,
     /// The clock the chips' fade-in reads (the panel's last frame time).
     pub(super) now: f64,
-    /// The storyboard's filmstrip and the render refreshing it.
-    pub(super) film: Option<super::strip::Film>,
-    pub(super) film_job: Option<super::strip::Pending>,
-    pub(super) strip_drag: Option<super::strip::Drag>,
+    /// The note being stretched on the Timeline: its id, where it started, the playhead last frame.
+    pub(super) stretching: Option<(u64, Tick, Tick)>,
+    /// Note snapshots rendering.
+    pub(super) snap_jobs: Vec<super::frames::SnapJob>,
+    /// The note stack's height last frame.
+    pub(super) stack_h: f32,
     /// The frame shown while marking a note's area, its render, and the box being dragged (comp px).
-    pub(super) mark: Option<(super::strip::FilmKey, egui::TextureHandle)>,
-    pub(super) mark_job: Option<super::strip::Pending>,
+    pub(super) mark: Option<(super::frames::FrameKey, egui::TextureHandle)>,
+    pub(super) mark_job: Option<super::frames::Pending>,
     pub(super) mark_drag: Option<egui::Pos2>,
     /// A note just added, whose text field takes the focus once.
     pub(super) focus_note: Option<u64>,
@@ -277,8 +279,10 @@ fn take_plan(app: &mut EffectcraftApp, title: String, beats: Vec<merlin_agent::B
         });
         ids.push(next);
     }
-    panel.strip_open = true;
-    panel.items.push(ChatItem::Plan { title, beats: ids, state: PlanState::Proposed });
+    panel.items.push(ChatItem::Plan { title, beats: ids.clone(), state: PlanState::Proposed });
+    for id in ids {
+        super::frames::request_snapshot(app, id);
+    }
 }
 
 /// Build the plan card at `item`: its beats become notes to apply, in Act mode.
@@ -317,8 +321,8 @@ pub(super) fn discard_plan(app: &mut EffectcraftApp, item: usize) {
     }
 }
 
-/// A new note at `start` (a range to `end`) on the active comp, about the selected layers; its
-/// editor opens. `None` without a comp.
+/// A new note at `start` (a range to `end`) on the active comp, about the selected layers, as a
+/// collapsed tab. `None` without a comp.
 pub(super) fn add_note(app: &mut EffectcraftApp, start: Tick, end: Option<Tick>, text: &str) -> Option<u64> {
     let comp = app.session.active_comp_id()?;
     let panel = &mut app.ui.merlin;
@@ -330,23 +334,24 @@ pub(super) fn add_note(app: &mut EffectcraftApp, start: Tick, end: Option<Tick>,
     };
     let layers = app.session.state.selected_layers.iter().map(|l| l.0).collect();
     panel.notes.push(Note { id, comp: comp.0, start, end, layers, text: text.to_string(), ..Note::default() });
-    panel.strip_open = true;
-    panel.editing_note = Some(id);
-    panel.rt.focus_note = Some(id);
+    // Tabs start collapsed; the callers that want typing open it.
     panel.settings_open = false;
+    super::frames::request_snapshot(app, id);
     Some(id)
 }
 
 pub(super) fn remove_note(app: &mut EffectcraftApp, id: u64) {
     let p = &mut app.ui.merlin;
     p.notes.retain(|n| n.id != id);
-    if p.editing_note == Some(id) {
-        p.editing_note = None;
+    p.open_notes.remove(&id);
+    if p.rt.stretching.is_some_and(|s| s.0 == id) {
+        p.rt.stretching = None;
     }
     if p.marking_note == Some(id) {
         p.marking_note = None;
     }
-    for k in [format!("note-before:{id}"), format!("note-after:{id}")] {
+    let [snap, snap_end] = super::frames::snap_keys(id);
+    for k in [format!("note-before:{id}"), format!("note-after:{id}"), snap, snap_end] {
         p.rt.frames.remove(&k);
         p.rt.textures.remove(&k);
     }
@@ -380,8 +385,9 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     for n in panel.notes.iter_mut().filter(|n| note_ids.contains(&n.id)) {
         n.status = NoteStatus::Sent;
     }
-    if note_ids.contains(&panel.editing_note.unwrap_or(0)) {
-        panel.editing_note = None;
+    panel.open_notes.retain(|id| !note_ids.contains(id));
+    if panel.rt.stretching.is_some_and(|s| note_ids.contains(&s.0)) {
+        panel.rt.stretching = None;
     }
     panel.input.clear();
     // Pictures first, then the words (what the providers recommend); failed chips are dropped.
@@ -902,6 +908,7 @@ fn enforce(app: &mut EffectcraftApp, scope: &Scope, cp: &Checkpoint, reply: Valu
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
     take_attachments(app, ctx);
+    super::frames::take_snapshots(app, ctx);
     sync_chat(app, now);
     if let Some((tx, rx)) = app.ui.merlin.rt.requests.take() {
         let mut reqs = std::mem::take(&mut app.ui.merlin.rt.deferred);
@@ -1034,14 +1041,14 @@ fn reset_chat(app: &mut EffectcraftApp) {
     p.items.clear();
     p.notes.clear();
     p.pins.clear();
-    p.editing_note = None;
+    p.open_notes.clear();
+    p.rt.stretching = None;
     p.marking_note = None;
     p.rt.conversation.clear();
     p.rt.checkpoints.clear();
     p.rt.appear.clear();
     p.rt.frames.retain(|k, _| k.starts_with("att:"));
     p.rt.textures.clear();
-    p.rt.film = None;
 }
 
 /// Load the chat saved for `project`, if any.

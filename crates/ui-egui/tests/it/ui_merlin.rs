@@ -386,83 +386,134 @@ fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
 }
 
-/// The storyboard strip: scrub, drop a note on a frame and one on a range, mark an area, apply them
-/// (the demo reports each one handled), and the chat shows what was applied.
+fn key(h: &mut Harness<'_, EffectcraftApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    h.event(egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers });
+    h.event(egui::Event::Key { key, physical_key: Some(key), pressed: false, repeat: false, modifiers });
+    h.run_steps(2);
+}
+
+/// `@` with the Timeline focused drops a note at the playhead into the Merlin panel; Shift+→
+/// stretches it into a range (not nudging the selected layer), Enter opens it for writing, and it
+/// shows on the Timeline's ruler; Send carries it, and the answer shows on its tab in the message.
 #[test]
-fn storyboard_notes_are_written_on_the_strip_and_applied_as_a_turn() {
+fn at_on_the_timeline_makes_a_note_that_stretches_into_a_range() {
+    use effectcraft_ui_egui::dock::PanelKind;
     use merlin_agent::notes::NoteStatus;
     let mut h = harness();
-    h.state_mut().ui.merlin.settings.provider = "demo".into();
-    h.state_mut()
-        .session
-        .execute("script.run", serde_json::json!({"code": "var c = app.project.items.addComp('Board', 640, 360, 1, 4, 30); c.openInViewer(); c.layers.addSolid([0.2,0.4,0.9], 'Blue', 640, 360, 1);"}))
-        .unwrap();
+    board(&mut h);
+    h.state_mut().session.execute("layer.select", serde_json::json!({"layers": ["#1"]})).unwrap();
+    let pos = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers[0].props.prop("transform/position").unwrap().value.clone();
+    let before = pos(&h);
+    h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.0));
+    h.state_mut().ui.focused = PanelKind::Timeline;
     h.run_steps(2);
-    assert!(h.state().auto.find("merlin.strip").is_none(), "collapsed by default");
-    click(&mut h, "merlin.strip.toggle");
-    assert!(h.state().ui.merlin.strip_open);
+    h.event(egui::Event::Text("@".into()));
     h.run_steps(2);
-
-    // A click on the strip moves the current time there (snapped to a frame).
-    click(&mut h, "merlin.strip");
-    let t = h.state().session.time().seconds();
-    assert!((t - 2.0).abs() < 0.1, "clicked the middle of a 4 s comp: {t}");
-
-    // + Note: a note at the current time, its editor open and focused for typing.
-    click(&mut h, "merlin.note.add");
     let notes = h.state().ui.merlin.notes.clone();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(h.state().ui.merlin.editing_note, Some(notes[0].id));
-    assert!((notes[0].start.seconds() - t).abs() < 1e-6 && notes[0].end.is_none());
-    h.input_mut().events.push(egui::Event::Text("Make the blue warmer".into()));
+    assert_eq!(notes.len(), 1, "a note at the playhead");
+    assert_eq!(notes[0].start.seconds(), 1.0);
+    assert!(notes[0].end.is_none() && !h.state().ui.merlin.open_notes.contains(&notes[0].id), "collapsed while it is stretched");
+    let id = notes[0].id;
+    // Shift+→ ×3: three frames later, the layer untouched.
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    for _ in 0..3 {
+        key(&mut h, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+    }
+    let n = h.state().ui.merlin.notes[0].clone();
+    assert_eq!(n.end.map(|e| e.seconds()), Some(1.1), "30 fps: 3 frames = 0.1 s");
+    assert_eq!(pos(&h), before, "Shift+→ stretched the note instead of nudging the layer");
+    // Moving the playhead any other way (a drag) keeps stretching it; back before the anchor flips it.
+    h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(0.5));
     h.run_steps(2);
-    assert_eq!(h.state().ui.merlin.notes[0].text, "Make the blue warmer");
-    assert!(h.state().auto.find("merlin.notes.apply").is_some(), "a written note can be applied");
+    let n = h.state().ui.merlin.notes[0].clone();
+    assert_eq!((n.start.seconds(), n.end.map(|e| e.seconds())), (0.5, Some(1.0)));
+    // It shows on the ruler.
+    assert!(h.state().auto.find(&format!("merlin.ruler.note.{id}")).is_some());
+    // Enter: done stretching, the tab opens for writing.
+    key(&mut h, egui::Key::Enter, egui::Modifiers::NONE);
+    assert!(h.state().ui.merlin.open_notes.contains(&id));
+    h.event(egui::Event::Text("Hold longer here".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.merlin.notes[0].text, "Hold longer here");
+    // Shift+→ nudges layers again once the note is done.
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.state_mut().ui.merlin.input.clear();
+    h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique(("merlin-note-text", id))));
+    h.run_steps(2);
+    key(&mut h, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+    assert_ne!(pos(&h), before, "layer nudging is back");
+    h.state_mut().session.execute("edit.undo", serde_json::json!({})).unwrap();
 
-    // Mark an area of its frame: the frame replaces the chat; drag a box; Done.
-    click(&mut h, "merlin.note.mark");
-    assert!(h.state().ui.merlin.marking_note.is_some());
+    // A second note: Escape on an empty one drops it.
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.run_steps(1);
+    h.event(egui::Event::Text("@".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.merlin.notes.len(), 2);
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.merlin.notes.len(), 1);
+
+    // Tabs: the stack shows the note; it collapses and expands, with a snapshot to mark.
+    h.run_steps(4);
+    click(&mut h, &format!("merlin.note.{id}"));
+    assert!(!h.state().ui.merlin.open_notes.contains(&id));
+    click(&mut h, &format!("merlin.note.{id}"));
+    assert!(h.state().ui.merlin.open_notes.contains(&id));
+    h.run_steps(2);
+    assert!(h.state().auto.find(&format!("merlin.note.{id}.mark")).is_some());
+    // Collapsed from the ruler, a click on its pin opens it again.
+    click(&mut h, "merlin.notes.collapseAll");
+    assert!(h.state().ui.merlin.open_notes.is_empty());
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.ruler.note.{id}"));
+    assert!(h.state().ui.merlin.open_notes.contains(&id));
+
+    // Send: the note goes with the message, and its tab in the message shows Merlin's answer.
+    h.state_mut().ui.merlin.input = "Please".into();
+    h.run_steps(2);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[0], ChatItem::User { notes, .. } if notes == &vec![id]), "{items:#?}");
+    assert!(matches!(h.state().ui.merlin.notes[0].status, NoteStatus::Addressed { .. }));
+    assert!(h.state().auto.find("merlin.notes.collapseAll").is_none(), "the stack is empty again");
+}
+
+/// `@` while typing goes into the text; Ask Merlin… on a layer starts a note about it.
+#[test]
+fn typed_at_signs_stay_text_and_ask_merlin_starts_a_note() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let mut h = harness();
+    board(&mut h);
+    click(&mut h, "merlin.input");
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.event(egui::Event::Text("mail@".into()));
+    h.run_steps(2);
+    assert!(h.state().ui.merlin.notes.is_empty());
+    assert_eq!(h.state().ui.merlin.input, "mail@");
+    let layer = h.state().session.active_comp().unwrap().layers[1].id.0;
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "merlin.ask", serde_json::json!({"layers": [layer]})).unwrap();
+    h.run_steps(2);
+    let n = h.state().ui.merlin.notes[0].clone();
+    assert_eq!(n.layers, vec![layer]);
+    assert!(h.state().ui.merlin.open_notes.contains(&n.id), "open for typing");
+    // Its snapshot marks an area: the frame takes the chat's place; drag a box; Done.
+    h.run_steps(4);
+    click(&mut h, &format!("merlin.note.{}.mark", n.id));
+    assert_eq!(h.state().ui.merlin.marking_note, Some(n.id));
     let area = rect_of(&h, "merlin.mark.area");
     drag(&mut h, area.lerp_inside(egui::vec2(0.25, 0.25)), area.lerp_inside(egui::vec2(0.5, 0.75)), egui::Modifiers::NONE);
     let [x, y, w, hh] = h.state().ui.merlin.notes[0].region.expect("an area was marked");
     assert!((x - 160.0).abs() < 8.0 && (y - 90.0).abs() < 8.0 && (w - 160.0).abs() < 8.0 && (hh - 180.0).abs() < 8.0, "{:?}", [x, y, w, hh]);
     click(&mut h, "merlin.mark.done");
     assert!(h.state().ui.merlin.marking_note.is_none());
-
-    // Shift-drag on the strip: a range note from 0.4 s to 1.2 s (the strip has grown a notes list).
-    let film = rect_of(&h, "merlin.strip");
-    let a = egui::pos2(film.min.x + film.width() * 0.1, film.center().y);
-    let b = egui::pos2(film.min.x + film.width() * 0.3, film.center().y);
-    drag(&mut h, a, b, egui::Modifiers::SHIFT);
-    let notes = h.state().ui.merlin.notes.clone();
-    assert_eq!(notes.len(), 2, "{notes:#?}");
-    let range = notes[1].clone();
-    let (s, e) = range.span();
-    assert!((s.seconds() - 0.4).abs() < 0.07 && (e.seconds() - 1.2).abs() < 0.07, "{s:?}..{e:?}");
-    h.input_mut().events.push(egui::Event::Text("Slower here".into()));
-    h.run_steps(2);
-
-    // An empty note isn't sent; delete it.
-    click(&mut h, "merlin.note.add");
-    let empty = h.state().ui.merlin.notes.last().unwrap().id;
-    h.run_steps(2);
-    click(&mut h, &format!("merlin.note.{empty}.delete"));
-    assert_eq!(h.state().ui.merlin.notes.len(), 2);
-    h.run_steps(2);
-
-    // Apply: one turn; the demo looks at the notes' frames and resolves each one.
-    click(&mut h, "merlin.notes.apply");
-    assert!(h.state().ui.merlin.busy);
-    assert!(h.state().ui.merlin.notes.iter().all(|n| n.status == NoteStatus::Sent));
-    wait_idle(&mut h);
-    let notes = h.state().ui.merlin.notes.clone();
-    assert!(notes.iter().all(|n| matches!(n.status, NoteStatus::Addressed { .. })), "{notes:#?}");
-    let items = h.state().ui.merlin.items.clone();
-    assert!(matches!(&items[0], ChatItem::User { text, notes, .. } if text.is_empty() && notes.len() == 2), "{items:#?}");
-    let resolved = items.iter().filter(|i| matches!(i, ChatItem::Tool { name, state: ToolState::Done, .. } if name == "resolve_note")).count();
-    assert_eq!(resolved, 2, "{items:#?}");
-    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "nothing left to apply");
-    assert!(matches!(items.last(), Some(ChatItem::Turn { label, .. }) if label == "Merlin: Apply 2 notes"));
+    // From a keyframe: its time and property.
+    let pos_uid = h.state().session.active_comp().unwrap().layers[1].props.prop("transform/position").unwrap().uid;
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "merlin.ask", serde_json::json!({"layer": layer, "prop": pos_uid, "time": 2.0})).unwrap();
+    let n = h.state().ui.merlin.notes[1].clone();
+    assert_eq!(n.start.seconds(), 2.0);
+    assert_eq!(n.props, vec!["Blue ▸ Position".to_string()]);
 }
 
 /// Agents and scripts add notes and apply them through `ui.set {"merlin": …}`.
@@ -577,7 +628,7 @@ fn locked_pins_refuse_edits_outside_them() {
     assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { decision: Decision::Pending, .. })));
 }
 
-/// Plan mode: Merlin only looks and answers with beats on the storyboard; Build it turns them into
+/// Plan mode: Merlin only looks and answers with beats (note tabs in the plan card); Build it turns them into
 /// notes and builds them in one turn; a plan can be revised or discarded.
 #[test]
 fn plan_mode_proposes_beats_and_builds_them() {
@@ -599,8 +650,7 @@ fn plan_mode_proposes_beats_and_builds_them() {
     assert_eq!((title.as_str(), *state, beats.len()), ("Big Launch", PlanState::Proposed, 3));
     let notes = h.state().ui.merlin.notes.clone();
     assert!(notes.iter().all(|n| n.author == Author::Merlin && n.status == NoteStatus::Proposed && n.end.is_some()), "{notes:#?}");
-    assert!(h.state().ui.merlin.strip_open, "the beats show on the storyboard");
-    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "beats aren't notes to apply yet");
+    assert!(h.state().auto.find("merlin.notes.collapseAll").is_none(), "beats aren't notes for the next message");
 
     // Asking again revises: the new plan replaces the old beats.
     h.state_mut().ui.merlin.input = "Make it faster".into();
@@ -623,7 +673,7 @@ fn plan_mode_proposes_beats_and_builds_them() {
 }
 
 #[test]
-fn a_discarded_plan_takes_its_beats_off_the_storyboard() {
+fn a_discarded_plan_drops_its_beats() {
     let mut h = harness();
     board(&mut h);
     h.state_mut().ui.merlin.mode = effectcraft_ui_egui::panels::merlin::Mode::Plan;
@@ -637,7 +687,7 @@ fn a_discarded_plan_takes_its_beats_off_the_storyboard() {
     assert!(h.state().ui.merlin.notes.is_empty());
 }
 
-/// Writes `target/test-out/merlin-plan.png` (a plan card, beats on the storyboard, a built note):
+/// Writes `target/test-out/merlin-plan.png` (a plan card with its beats):
 /// `cargo test -p effectcraft-ui-egui --test it merlin_plan_snapshot -- --ignored`.
 #[test]
 #[ignore]

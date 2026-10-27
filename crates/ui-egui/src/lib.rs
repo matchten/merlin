@@ -2474,6 +2474,8 @@ impl EffectcraftApp {
         prefs_live::frame(self, &ctx);
         self.auto.begin_frame();
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
+        // Merlin: `@` on the Timeline starts a note (and takes Shift+←/→ while it is stretched).
+        panels::merlin::before_shortcuts(self, &ctx);
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {
             self.ui.viewer.property_interacting = false;

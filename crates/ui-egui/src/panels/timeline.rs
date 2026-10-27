@@ -3105,6 +3105,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                         crate::widgets::context_menu(&kresp, |ui| {
                             for (lbl, cmd, params) in [
+                                ("Ask Merlin…", "merlin.ask", json!({"layer": layer.id.0, "prop": uid, "time": k.time.seconds()})),
+                                ("-", "", json!({})),
                                 ("Edit Value…", "keys.set", json!({"layer": layer.id.0, "prop": uid, "time": k.time.seconds()})),
                                 ("-", "", json!({})),
                                 ("Copy", "keys.copy", json!({})),
@@ -3551,6 +3553,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mrows = rows_rect.intersect(Rect::from_min_max(pos2(graph_x0, rows_rect.min.y), rows_rect.max));
     super::markers_ui::comp_markers(app, ui, &comp, tm, mstrip, mrows);
     super::markers_ui::marker_bin(app, ui, &comp, tm, bin, mstrip);
+    // Merlin's notes on this comp.
+    super::merlin::ruler_notes(app, ui, &tm, mstrip);
 
     // Spacebar held: the Hand tool. Dragging pans the rows vertically as well as scrolling the
     // time graph in time when zoomed in (registered last, so it takes the drag from the bars,
@@ -4214,6 +4218,8 @@ pub(crate) fn layer_menu(
         item(ui, "Adjustment Layer", "layer.newAdjustment", json!({}));
     });
     item(ui, "Layer Settings…", "layer.settings", json!({}));
+    // Merlin: a note about these layers.
+    item(ui, "Ask Merlin…", "merlin.ask", json!({"layers": layers}));
     if caps.source {
         item(ui, "Reveal Layer Source in Project", "layer.revealSource", json!({"layers": layers}));
     }

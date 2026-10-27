@@ -8,19 +8,27 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod frames;
 pub(crate) mod markdown;
 #[cfg(not(target_arch = "wasm32"))]
 mod mentions;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-mod strip;
+mod note_tabs;
+#[cfg(not(target_arch = "wasm32"))]
+mod timeline_hook;
 #[cfg(not(target_arch = "wasm32"))]
 mod view;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use native::Runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{apply_ui_set, attach_paths, take_main_window_files, take_window_files, tick};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use timeline_hook::ruler_notes;
+#[cfg(not(target_arch = "wasm32"))]
+pub use timeline_hook::{ask, before_shortcuts};
 #[cfg(not(target_arch = "wasm32"))]
 pub use view::show;
 
@@ -42,12 +50,10 @@ pub struct MerlinPanel {
     /// Notes on moments of the timeline (the storyboard strip), applied together as a turn.
     #[cfg(not(target_arch = "wasm32"))]
     pub notes: Vec<merlin_agent::notes::Note>,
-    /// The storyboard strip is expanded.
-    pub strip_open: bool,
-    /// The note whose editor is open.
-    pub editing_note: Option<u64>,
     /// The note whose area is being marked on its frame (the frame replaces the conversation).
     pub marking_note: Option<u64>,
+    /// Note tabs shown expanded (they start collapsed).
+    pub open_notes: std::collections::BTreeSet<u64>,
     /// What the next message is pinned to (`@` mentions, or a click on a context chip).
     pub pins: Vec<Pin>,
     /// Act (build) or Plan (propose timed beats first).
@@ -251,6 +257,17 @@ pub fn show(app: &mut crate::EffectcraftApp, ui: &mut egui::Ui, rect: egui::Rect
 
 #[cfg(target_arch = "wasm32")]
 pub fn tick(_: &mut crate::EffectcraftApp, _: &egui::Context, _: f64) {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn before_shortcuts(_: &mut crate::EffectcraftApp, _: &egui::Context) {}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn ruler_notes(_: &mut crate::EffectcraftApp, _: &mut egui::Ui, _: &crate::panels::timeline::TMap, _: egui::Rect) {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn ask(_: &mut crate::EffectcraftApp, _: &serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("Merlin runs in the desktop app".into())
+}
 
 #[cfg(target_arch = "wasm32")]
 pub fn apply_ui_set(_: &mut crate::EffectcraftApp, _: &egui::Context, _: &serde_json::Value) -> Result<(), String> {

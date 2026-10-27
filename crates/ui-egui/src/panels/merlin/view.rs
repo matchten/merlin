@@ -49,6 +49,7 @@ enum Act {
     PinFrame,
     PinLayers,
     BuildPlan(usize),
+    Note(super::note_tabs::NoteAct),
     Restore(usize),
     DiscardPlan(usize),
     SetMode(Mode),
@@ -86,20 +87,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let footer_h = (148.0 + chips + pins).min(rect.height() * 0.6);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
     let middle = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
-    let strip_h = super::strip::height(app, middle.height());
-    let body = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.max.y - strip_h));
-    let strip = Rect::from_min_max(pos2(rect.min.x, body.max.y), middle.max);
+    let stack_h = super::note_tabs::stack_height(app, middle.height());
+    let body = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.max.y - stack_h));
+    let stack = Rect::from_min_max(pos2(rect.min.x, body.max.y), middle.max);
     let mut acts = vec![];
     header_ui(app, ui, header, &look, now, &mut acts);
     if app.ui.merlin.settings_open {
         settings_ui(app, ui, Rect::from_min_max(middle.min, rect.max), &look, &mut acts);
     } else {
         if app.ui.merlin.marking_note.is_some() {
-            super::strip::mark_ui(app, ui, body, &look);
+            super::note_tabs::mark_ui(app, ui, body, &look);
         } else {
             log_ui(app, ui, body, &look, now, &mut acts);
         }
-        super::strip::show(app, ui, strip, &look);
+        if stack_h > 0.0 {
+            super::note_tabs::stack_ui(app, ui, stack, &look, now);
+        }
         composer_ui(app, ui, footer, &look, now, &mut acts);
     }
     if std::mem::take(&mut app.ui.merlin.rt.drop_hover) {
@@ -132,6 +135,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             Act::SaveKey | Act::RemoveKey => native::save_or_remove_key(app, matches!(a, Act::SaveKey)),
             Act::BuildPlan(i) => native::build_plan(app, &ctx, i),
+            Act::Note(a) => super::note_tabs::apply(app, vec![a]),
             Act::Restore(i) => native::restore(app, &ctx, i),
             Act::DiscardPlan(i) => native::discard_plan(app, i),
             Act::SetMode(m) => app.ui.merlin.mode = m,
@@ -360,14 +364,26 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                                     thumbnails(ui, &ctx, &mut panel.rt, &keys, 72.0);
                                 }
                                 if !notes.is_empty() {
-                                    let n = notes.len();
-                                    ui.horizontal(|ui| {
-                                        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                                        icons::paint(ui.painter(), r, Icon::Chat, Color32::from_rgb(0xff, 0xb8, 0x00));
-                                        let what =
-                                            if n == 1 { tr("Applied 1 storyboard note").to_string() } else { tr_args("Applied {} storyboard notes", &[&n]) };
-                                        ui.label(RichText::new(what).font(Tokens::medium(11.5)).color(t.text_dim));
-                                    });
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+                                    let mut note_acts = vec![];
+                                    for id in notes {
+                                        if let Some(note) = panel.notes.iter_mut().find(|n| n.id == *id) {
+                                            let open = panel.open_notes.contains(id);
+                                            super::note_tabs::tab(
+                                                ui,
+                                                session,
+                                                &mut panel.rt,
+                                                auto,
+                                                look,
+                                                note,
+                                                super::note_tabs::Mode::Read,
+                                                open,
+                                                now,
+                                                &mut note_acts,
+                                            );
+                                        }
+                                    }
+                                    acts.extend(note_acts.into_iter().map(Act::Note));
                                 }
                                 if !pins.is_empty() {
                                     ui.horizontal_wrapped(|ui| {
@@ -429,20 +445,22 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     }
                     ChatItem::Notice { text, error } => notice_ui(ui, text, *error, look),
                     ChatItem::Plan { title, beats, state } => {
-                        let rows: Vec<(String, String)> = beats
-                            .iter()
-                            .filter_map(|id| panel.notes.iter().find(|n| n.id == *id))
-                            .map(|n| {
-                                let comp = session.project.comp(effectcraft_engine::project::ItemId(n.comp));
-                                let at = |t| comp.map(|c| crate::panels::timecode(session, c, t)).unwrap_or_default();
-                                let when = match n.end {
-                                    Some(e) => format!("{} – {}", at(n.start), at(e)),
-                                    None => at(n.start),
-                                };
-                                (when, n.text.clone())
-                            })
-                            .collect();
-                        plan_card(ui, auto, acts, look, i, title, &rows, *state, busy);
+                        let any = beats.iter().any(|id| panel.notes.iter().any(|n| n.id == *id));
+                        let mode = if *state == PlanState::Proposed { super::note_tabs::Mode::Edit } else { super::note_tabs::Mode::Read };
+                        let mut note_acts = vec![];
+                        let notes = &mut panel.notes;
+                        let rt = &mut panel.rt;
+                        let opened = &panel.open_notes;
+                        plan_card(ui, auto, acts, look, i, title, any, *state, busy, &mut |ui, auto| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            for id in beats {
+                                if let Some(note) = notes.iter_mut().find(|n| n.id == *id) {
+                                    let open = opened.contains(id);
+                                    super::note_tabs::tab(ui, session, rt, auto, look, note, mode, open, now, &mut note_acts);
+                                }
+                            }
+                        });
+                        acts.extend(note_acts.into_iter().map(Act::Note));
                     }
                 }
             });
@@ -866,9 +884,10 @@ fn plan_card(
     look: &Look,
     i: usize,
     title: &str,
-    rows: &[(String, String)],
+    any_beats: bool,
     state: PlanState,
     busy: bool,
+    beats: &mut dyn FnMut(&mut egui::Ui, &mut crate::automation::Registry),
 ) {
     let t = look.t;
     let live = state == PlanState::Proposed;
@@ -887,22 +906,14 @@ fn plan_card(
                 ui.label(RichText::new(title).font(Tokens::semibold(13.0)).color(t.text));
             });
             ui.add_space(4.0);
-            if rows.is_empty() {
-                ui.label(RichText::new(tr("Its beats were removed from the storyboard.")).font(Tokens::ui(11.5)).color(t.text_faint));
+            if !any_beats {
+                ui.label(RichText::new(tr("Its beats were removed.")).font(Tokens::ui(11.5)).color(t.text_faint));
             }
-            for (k, (when, text)) in rows.iter().enumerate() {
-                ui.horizontal_top(|ui| {
-                    ui.label(RichText::new(format!("{}", k + 1)).font(Tokens::semibold(11.5)).color(look.magic));
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(when).font(Tokens::medium(11.0)).color(t.text_dim));
-                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(12.5)).color(t.text)).wrap());
-                    });
-                });
-            }
+            beats(ui, auto);
             ui.add_space(6.0);
             match state {
                 PlanState::Proposed => {
-                    ui.label(RichText::new(tr("Edit the beats on the storyboard, ask for changes, or build it.")).font(Tokens::ui(11.0)).color(t.text_faint));
+                    ui.label(RichText::new(tr("Open a beat to edit or retime it, ask for changes, or build it.")).font(Tokens::ui(11.0)).color(t.text_faint));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let b = pill(ui, tr("Build it"), true, !busy, look, &format!("plan-build-{i}"));
