@@ -232,6 +232,9 @@ pub enum ChatItem {
         /// Approximate cost in dollars (models with known prices).
         #[serde(default)]
         cost: Option<f64>,
+        /// The filmstrip shows the frames before the turn (else after).
+        #[serde(default)]
+        showing_before: bool,
     },
     Notice {
         text: String,

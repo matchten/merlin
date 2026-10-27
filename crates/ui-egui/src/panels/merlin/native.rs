@@ -47,6 +47,25 @@ enum WorkerMsg {
         outcome: TurnOutcome,
         conversation: Vec<Message>,
     },
+    /// Frames across the comp before the turn (`after`: false) or after it.
+    Film {
+        after: bool,
+        pngs: Vec<Vec<u8>>,
+    },
+}
+
+/// Frames in the before / after filmstrip, and their longest side.
+const FILM_FRAMES: usize = 5;
+const FILM_SIDE: u32 = 240;
+
+/// `FILM_FRAMES` frames spread across `comp` (`duration` seconds).
+fn film(host: &mut dyn merlin_agent::Host, comp: u64, duration: f64) -> Vec<Vec<u8>> {
+    (0..FILM_FRAMES)
+        .filter_map(|i| {
+            let t = duration * (i as f64 + 0.5) / FILM_FRAMES as f64;
+            host.render(Some(&json!(comp)), Some(t), FILM_SIDE).ok().map(|f| f.png)
+        })
+        .collect()
 }
 
 /// Attachment decodes and attach-dialog answers, from background threads.
@@ -434,6 +453,7 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let (pins, scope) = super::mentions::briefs(app);
     let plan_mode = app.ui.merlin.mode == Mode::Plan;
     let style = active_kit(&app.ui.merlin).map(merlin_agent::style::block);
+    let strip = app.session.active_comp_id().zip(app.session.active_comp()).map(|(id, c)| (id.0, c.duration.seconds()));
     let turn_ctx = TurnContext { time, notes: briefs, pins, plan_mode, current_plan: if plan_mode { current_plan(app) } else { None }, style };
     let panel = &mut app.ui.merlin;
     let pin_labels: Vec<String> = std::mem::take(&mut panel.pins).into_iter().map(|p| if p.locked { format!("🔒 {}", p.label) } else { p.label }).collect();
@@ -504,6 +524,12 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
             rx.recv_timeout(REQUEST_TIMEOUT).map_err(|_| format!("{method}: the app didn't answer"))
         });
         let mut conversation = conversation;
+        // Before / after: frames across the comp, for the Keep / Revert card.
+        let before = strip.map(|(c, d)| film(&mut host, c, d)).unwrap_or_default();
+        let filmed = !before.is_empty();
+        if filmed {
+            let _ = ev_tx.send(WorkerMsg::Film { after: false, pngs: before });
+        }
         let outcome = run_turn_with(
             provider.as_ref(),
             &mut host,
@@ -517,6 +543,12 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
             },
             &cancel_turn,
         );
+        if let (true, Some((c, d))) = (filmed, strip) {
+            let after = film(&mut host, c, d);
+            if !after.is_empty() {
+                let _ = ev_tx.send(WorkerMsg::Film { after: true, pngs: after });
+            }
+        }
         let _ = ev_tx.send(WorkerMsg::Done { outcome, conversation });
         ctx_ev.request_repaint();
     });
@@ -892,6 +924,7 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
         input_tokens: usage.total_input(),
         output_tokens: usage.output_tokens,
         cost: merlin_agent::pricing::cost(&w.model, &usage),
+        showing_before: false,
     });
     if changed {
         panel.rt.checkpoints.push((w.turn, w.checkpoint));
@@ -1029,6 +1062,11 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
         match m {
             WorkerMsg::Event(e) => events.push(e),
             WorkerMsg::Status(s) => w.status = s,
+            WorkerMsg::Film { after, pngs } => {
+                let key = format!("turn-{}:{}", if after { "after" } else { "before" }, w.turn);
+                app.ui.merlin.rt.textures.remove(&key);
+                app.ui.merlin.rt.frames.insert(key, pngs);
+            }
             WorkerMsg::Done { outcome, conversation } => {
                 done = Some((outcome, conversation));
                 break;

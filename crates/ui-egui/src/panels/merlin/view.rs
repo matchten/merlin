@@ -47,6 +47,7 @@ enum Act {
     Unattach(usize),
     Suggest(usize),
     ToggleStyle,
+    Compare(u64),
     PinFrame,
     PinLayers,
     BuildPlan(usize),
@@ -123,6 +124,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 p.settings_open = !p.settings_open;
                 p.style_open = false;
                 p.rt.key_status = None;
+            }
+            Act::Compare(t) => {
+                for it in &mut app.ui.merlin.items {
+                    if let ChatItem::Turn { id, showing_before, .. } = it
+                        && *id == t
+                    {
+                        *showing_before = !*showing_before;
+                    }
+                }
             }
             Act::ToggleStyle => {
                 let p = &mut app.ui.merlin;
@@ -469,9 +479,18 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     ChatItem::Tool { id, name, input, state, summary, frames, open } => {
                         tool_card(ui, &ctx, &mut panel.rt, auto, acts, look, i, (id, name, input, *state, summary, *frames, *open));
                     }
-                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost } => {
+                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost, showing_before } => {
                         ui.add_space(2.0);
-                        turn_card(ui, auto, acts, look, &latest, (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens, *cost));
+                        turn_card(
+                            ui,
+                            &mut panel.rt,
+                            auto,
+                            acts,
+                            look,
+                            &latest,
+                            (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens, *cost),
+                            *showing_before,
+                        );
                         ui.add_space(6.0);
                     }
                     ChatItem::Notice { text, error } => notice_ui(ui, text, *error, look),
@@ -763,13 +782,16 @@ fn code_block(ui: &mut egui::Ui, text: &str, look: &Look) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn turn_card(
     ui: &mut egui::Ui,
+    rt: &mut Runtime,
     auto: &mut crate::automation::Registry,
     acts: &mut Vec<Act>,
     look: &Look,
     latest: &[u64],
     (id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost): (u64, &String, &String, Decision, usize, u64, u64, Option<f64>),
+    before: bool,
 ) {
     let t = look.t;
     let mut stats = tr_args("{} tool calls · {} in · {} out", &[&tool_calls, &tokens(input_tokens), &tokens(output_tokens)]);
@@ -811,6 +833,34 @@ fn turn_card(
             let mut job = LayoutJob::simple_singleline(format!("{label} · {stats}"), Tokens::ui(11.0), t.text_faint);
             job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
             ui.label(job);
+            // Before / after: frames across the comp.
+            let (bk, ak) = (format!("turn-before:{id}"), format!("turn-after:{id}"));
+            if rt.frames.contains_key(&bk) && rt.frames.contains_key(&ak) {
+                ui.add_space(6.0);
+                let ctx = ui.ctx().clone();
+                let texs: Vec<egui::TextureHandle> = textures(&ctx, rt, if before { &bk } else { &ak }).to_vec();
+                let n = texs.len().max(1) as f32;
+                let w = ((ui.available_width() - 3.0 * (n - 1.0)) / n).max(20.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for tx in &texs {
+                        let [tw, th] = tx.size();
+                        let size = vec2(w, w * th.max(1) as f32 / tw.max(1) as f32);
+                        ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tx.id(), size)).corner_radius(3.0));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for (label, on_before, key) in [(tr("After"), false, "after"), (tr("Before"), true, "before")] {
+                        let on = before == on_before;
+                        let b = ui.selectable_label(on, RichText::new(label).font(Tokens::medium(11.0)));
+                        auto.add_response(&format!("merlin.turn.{id}.{key}"), &b, label);
+                        if b.clicked() && !on {
+                            acts.push(Act::Compare(id));
+                        }
+                    }
+                    ui.label(RichText::new(tr("across the comp")).font(Tokens::ui(10.5)).color(t.text_faint));
+                });
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let keep = pill(ui, tr("Keep"), true, true, look, &format!("keep{id}"));

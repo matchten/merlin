@@ -878,3 +878,39 @@ fn merlin_style_snapshot() {
     std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
     h.render().expect("render").save(out).unwrap();
 }
+
+/// The Keep / Revert card shows frames across the comp after the turn, and before it on demand.
+#[test]
+fn the_keep_card_compares_frames_before_and_after() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.input = "A title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    h.run_steps(3);
+    let Some(ChatItem::Turn { id, showing_before, .. }) = h.state().ui.merlin.items.last().cloned() else { panic!("no turn card") };
+    assert!(!showing_before);
+    assert!(h.state().auto.find(&format!("merlin.turn.{id}.after")).is_some(), "the filmstrip shows");
+    click(&mut h, &format!("merlin.turn.{id}.before"));
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { showing_before: true, .. })));
+    click(&mut h, &format!("merlin.turn.{id}.after"));
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { showing_before: false, .. })));
+}
+
+/// Writes `target/test-out/merlin-film.png` (a Keep / Revert card with its filmstrip):
+/// `cargo test -p effectcraft-ui-egui --test it merlin_film_snapshot -- --ignored`.
+#[test]
+#[ignore]
+fn merlin_film_snapshot() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.input = "LAUNCH".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    h.run_steps(6);
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-film.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    h.render().expect("render").save(out).unwrap();
+}
