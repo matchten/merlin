@@ -18,11 +18,11 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
-    fn json(v: Value) -> ToolOutput {
+    pub(crate) fn json(v: Value) -> ToolOutput {
         ToolOutput { content: vec![ResultPart::Text { text: compact(&v) }], is_error: false, frames: vec![] }
     }
 
-    fn error(msg: impl Into<String>) -> ToolOutput {
+    pub(crate) fn error(msg: impl Into<String>) -> ToolOutput {
         ToolOutput { content: vec![ResultPart::Text { text: msg.into() }], is_error: true, frames: vec![] }
     }
 
@@ -171,8 +171,23 @@ pub fn specs() -> Vec<ToolSpec> {
             description: "Import a file (image, video, audio, .ai, .svg, .pdf, .psd) into the project, e.g. one the user attached; returns the new item. Pass `addToComp` to also place it as a layer in the active comp.",
             input_schema: schema(json!({"path": {"type": "string", "description": "Absolute path."}, "addToComp": {"type": "boolean"}}), &["path"]),
         },
+        ToolSpec {
+            name: RESOLVE_NOTE,
+            description: "Report one of the user's timeline notes (the <notes> block) as handled, after fixing it and re-rendering its frame to check; or as won't fix, saying why. The user sees each note's status and its frame before and after.",
+            input_schema: schema(
+                json!({
+                    "id": {"type": "integer", "description": "The note's id from the <notes> block."},
+                    "status": {"type": "string", "enum": ["addressed", "wont_fix"]},
+                    "summary": {"type": "string", "description": "One sentence: what changed (or why not)."}
+                }),
+                &["id", "status", "summary"],
+            ),
+        },
     ]
 }
+
+/// The tool that reports a note done; the turn loop runs it (it talks to the panel, not the engine).
+pub const RESOLVE_NOTE: &str = "resolve_note";
 
 /// Most frames one `render_frames` call returns (each is input tokens for the model).
 pub const MAX_FRAMES: usize = 8;
@@ -209,6 +224,7 @@ pub fn run(host: &mut dyn Host, name: &str, input: &Value, frame_max_side: u32) 
         "list_fonts" => host.command("text.fonts", obj(&[("query", get(input, "query"))])).map(ToolOutput::json),
         "render_frames" => render_frames(host, input, frame_max_side),
         "import_file" => import_file(host, input),
+        RESOLVE_NOTE => Err("resolve_note only works during a turn that has notes".into()),
         other => Err(format!("unknown tool `{other}`")),
     };
     r.unwrap_or_else(ToolOutput::error)

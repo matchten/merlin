@@ -78,6 +78,10 @@ fn run() -> Result<(), String> {
                 }
             }
             AgentEvent::Usage(u) => eprintln!("  [{} in ({} cached) · {} out]", u.total_input(), u.cache_read_tokens, u.output_tokens),
+            AgentEvent::NoteFrame { .. } => {}
+            AgentEvent::NoteResolved { id, addressed, summary, .. } => {
+                eprintln!("  note {id} {}: {summary}", if addressed { "addressed" } else { "won't fix" })
+            }
         },
         &AtomicBool::new(false),
     );

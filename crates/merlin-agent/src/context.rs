@@ -11,6 +11,12 @@ const MAX_LAYERS: usize = 40;
 
 /// A short text block describing the editor state. Never fails: missing pieces are left out.
 pub fn snapshot(host: &mut dyn Host) -> String {
+    snapshot_at(host, None)
+}
+
+/// [`snapshot`], with the current time given as the app displays it (e.g. `0:00:01:12 (frame 42,
+/// 1.400 s)`) instead of in seconds.
+pub fn snapshot_at(host: &mut dyn Host, time: Option<&str>) -> String {
     let summary = host.command("project.summary", json!({})).unwrap_or(Value::Null);
     let mut out = String::from("<editor_context>\n");
     let comps: Vec<String> = summary["items"]
@@ -26,14 +32,14 @@ pub fn snapshot(host: &mut dyn Host) -> String {
         out.push_str("No composition is open.\n");
     } else if let Ok(c) = host.command("comp.info", json!({})) {
         out.push_str(&format!(
-            "Active comp: \"{}\" (id {}), {}×{} px, {} fps, duration {} s. Current time: {} s.\n",
+            "Active comp: \"{}\" (id {}), {}×{} px, {} fps, duration {} s. Current time: {}.\n",
             c["name"].as_str().unwrap_or("?"),
             c["id"],
             c["width"],
             c["height"],
             c["frameRate"],
             c["duration"],
-            summary["time"]
+            time.map(str::to_string).unwrap_or_else(|| format!("{} s", summary["time"]))
         ));
         let layers = c["layers"].as_array().map(Vec::as_slice).unwrap_or_default();
         if layers.is_empty() {

@@ -12,6 +12,7 @@
 //! * [`agent_loop`]: one user turn: stream a reply, run its tool calls, feed results back, repeat.
 //! * [`checkpoint`]: folds a turn's edits into one undo step and reverts it.
 //! * [`attachment`]: files the user attaches (images, PSD, SVG, PDF, AI…) decoded into labelled images.
+//! * [`notes`]: requests pinned to a frame or range of a comp, applied as one turn.
 //! * [`keys`]: API keys from environment variables or the OS keychain, never from preferences.
 //!
 //! Layering: depends on `effectcraft-engine`, `effectcraft-automation` (PNG encoding) and
@@ -27,13 +28,14 @@ pub mod context;
 pub mod conversation;
 pub mod host;
 pub mod keys;
+pub mod notes;
 pub mod provider;
 pub mod providers;
 pub mod sse;
 pub mod tools;
 pub mod transport;
 
-pub use agent_loop::{AgentEvent, TurnOutcome, run_turn};
+pub use agent_loop::{AgentEvent, TurnContext, TurnOutcome, run_turn, run_turn_with};
 pub use config::{AgentConfig, ProviderKind};
 pub use conversation::{Message, Part, ResultPart, Role};
 pub use host::{HeadlessHost, Host, RemoteHost};
