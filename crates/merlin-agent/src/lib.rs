@@ -34,7 +34,7 @@ pub mod transport;
 pub use agent_loop::{AgentEvent, TurnOutcome, run_turn};
 pub use config::{AgentConfig, ProviderKind};
 pub use conversation::{Message, Part, ResultPart, Role};
-pub use host::{HeadlessHost, Host};
+pub use host::{HeadlessHost, Host, RemoteHost};
 pub use provider::LlmProvider;
 
 /// The system prompt: how EffectCraft works and how to animate it (stable, so providers cache it).

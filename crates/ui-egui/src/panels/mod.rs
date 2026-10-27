@@ -29,6 +29,7 @@ pub mod layer_styles_dialog;
 pub mod learn;
 pub mod markers_ui;
 pub mod media_panels;
+pub mod merlin;
 pub mod misc;
 pub mod object_matte_tool;
 pub mod paint_panels;
@@ -194,6 +195,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
         PanelKind::Markers => misc::markers(app, ui, rect),
         PanelKind::MaskInterpolation => anim_tools::mask_interpolation(app, ui, rect),
         PanelKind::ScriptConsole => script_console::show(app, ui, rect),
+        PanelKind::Merlin => merlin::show(app, ui, rect),
         PanelKind::Wiggler => anim_tools::wiggler(app, ui, rect),
         PanelKind::Smoother => anim_tools::smoother(app, ui, rect),
         PanelKind::MotionSketch => anim_tools::motion_sketch(app, ui, rect),

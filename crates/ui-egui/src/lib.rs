@@ -2318,6 +2318,8 @@ impl EffectcraftApp {
             self.advance_playback(ctx, scale, now, active, cid);
         }
         self.drain_control(ctx, now);
+        // Merlin: the agent's tool calls run here, between frames, like control requests.
+        panels::merlin::tick(self, ctx, now);
         // Screenshot completion, deadlines and issuance are app-side work: the callback only
         // stores pixels and wakes this viewport.
         self.tick_screenshots(ctx);

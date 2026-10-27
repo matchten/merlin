@@ -1,6 +1,7 @@
 //! Provider adapters and the factory that picks one from [`AgentConfig`].
 
 pub mod anthropic;
+pub mod demo;
 pub mod openai_compat;
 
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use crate::{Error, Result};
 pub fn build(cfg: &AgentConfig, key: String, transport: Arc<dyn Transport>) -> Box<dyn LlmProvider> {
     match cfg.provider {
         ProviderKind::Anthropic => Box::new(anthropic::Anthropic::new(cfg, key, transport)),
+        ProviderKind::Demo => Box::new(demo::Demo::default()),
         kind => Box::new(openai_compat::OpenAiCompat::new(kind, cfg, key, transport)),
     }
 }

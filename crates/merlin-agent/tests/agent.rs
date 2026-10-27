@@ -322,9 +322,9 @@ fn loop_builds_animation_renders_and_collapses_into_one_undo_step() {
     assert_eq!(third[4]["content"][0]["content"][1]["type"], "image");
 
     // Checkpoint: the turn's many steps become one undo entry, and Revert restores the project.
-    assert!(cp.collapse(&mut h.session, "Agent: make a title slide up"));
+    assert!(cp.collapse(&mut h.session, "Merlin: make a title slide up"));
     assert_eq!(h.session.history.undo.len(), undo_before + 1);
-    assert_eq!(h.session.history.undo.last().unwrap().0, "Agent: make a title slide up");
+    assert_eq!(h.session.history.undo.last().unwrap().0, "Merlin: make a title slide up");
     assert!(cp.revert(&mut h.session));
     assert!(!cp.changed(&h.session));
     assert!(h.command("comp.info", json!({"comp": "Main"})).is_err());
@@ -391,4 +391,20 @@ fn context_snapshot_describes_the_editor() {
 fn settings_hold_no_secrets() {
     let s = serde_json::to_string(&AgentConfig::default()).unwrap();
     assert!(!s.to_ascii_lowercase().contains("key"), "{s}");
+}
+
+#[test]
+fn demo_provider_plays_a_full_turn_offline() {
+    let p = merlin_agent::providers::demo::Demo { chunk_delay: std::time::Duration::ZERO };
+    let mut h = host();
+    let mut events = vec![];
+    let cfg = AgentConfig { provider: ProviderKind::Demo, frame_max_side: 128, ..Default::default() };
+    let out = run_turn(&p, &mut h, &cfg, &mut vec![], vec![Part::Text { text: "Hello \"world\"".into() }], &mut |e| events.push(e), &AtomicBool::new(false));
+    assert_eq!(out.end, TurnEnd::Done);
+    assert_eq!(out.tool_calls, 2);
+    assert!(events.iter().all(|e| !matches!(e, AgentEvent::ToolFinished { is_error: true, .. })), "{events:?}");
+    let info = h.command("comp.info", json!({})).unwrap();
+    assert_eq!(info["name"], "Merlin Demo");
+    assert_eq!(info["layers"][0]["name"], "Demo Title");
+    assert_eq!(info["layers"][1]["name"], "Demo Background");
 }

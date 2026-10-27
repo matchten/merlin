@@ -37,6 +37,8 @@ image = { workspace = true }
 craft-ui = { workspace = true, features = ["native-windows"] }
 craft-update = { workspace = true }
 sys-locale = { workspace = true }
+# This fork's in-app agent (Window ▸ Merlin); desktop only for now.
+merlin-agent = { path = "../merlin-agent" }
 
 [dev-dependencies]
 # Fonts for kittest: the workspace `egui` features are what test roots resolve, but stating them

@@ -142,14 +142,14 @@ pub fn run_turn(
     TurnOutcome { end, usage, tool_calls }
 }
 
-/// The undo label for a turn: "Agent: " and the start of the request.
+/// The undo label for a turn: "Merlin: " and the start of the request.
 pub fn turn_label(request: &str) -> String {
     let first = request.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let mut short: String = first.chars().take(48).collect();
     if first.chars().count() > 48 {
         short.push('…');
     }
-    if short.is_empty() { "Agent".into() } else { format!("Agent: {short}") }
+    if short.is_empty() { "Merlin".into() } else { format!("Merlin: {short}") }
 }
 
 #[cfg(test)]
@@ -158,8 +158,8 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(turn_label("\n  make it bounce\nmore"), "Agent: make it bounce");
-        assert_eq!(turn_label(""), "Agent");
+        assert_eq!(turn_label("\n  make it bounce\nmore"), "Merlin: make it bounce");
+        assert_eq!(turn_label(""), "Merlin");
         assert!(turn_label(&"x".repeat(100)).ends_with('…'));
     }
 }

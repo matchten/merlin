@@ -86,6 +86,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("script", "engine"),
     ("host", "script"),
     ("merlin-agent", "automation"),
+    ("ui-egui", "merlin-agent"),
     ("cli", "effectcraft"),
 ];
 

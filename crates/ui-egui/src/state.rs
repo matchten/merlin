@@ -565,6 +565,9 @@ pub struct UiState {
     /// Window ▸ Script Console input, output and history.
     #[serde(default)]
     pub script_console: crate::panels::script_console::ScriptConsole,
+    /// Window ▸ Merlin: the agent chat (conversation, input, provider settings).
+    #[serde(default)]
+    pub merlin: crate::panels::merlin::MerlinPanel,
     /// Tool shown in each toolbar slot.
     pub slot_tools: Vec<Tool>,
     pub workspace: String,
@@ -695,6 +698,7 @@ impl Default for UiState {
         UiState {
             tool: Tool::Selection,
             script_console: Default::default(),
+            merlin: Default::default(),
             slot_tools: Tool::SLOTS.iter().map(|s| s[0]).collect(),
             workspace: "Default".into(),
             dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),

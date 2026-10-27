@@ -54,11 +54,16 @@ impl Checkpoint {
         }
     }
 
+    /// Whether the turn (after [`Checkpoint::collapse`]) is still the latest undo step, so
+    /// [`Checkpoint::revert`] would undo exactly it.
+    pub fn is_latest(&self, s: &Session) -> bool {
+        self.changed(s) && s.history.undo.last().is_some_and(|(_, p)| Arc::ptr_eq(p, &self.snap))
+    }
+
     /// Undo the turn after [`Checkpoint::collapse`]: only when the turn is still the latest step,
     /// so a later edit of the user's is never undone with it. Returns whether it reverted.
     pub fn revert(&self, s: &mut Session) -> bool {
-        let latest_is_turn = s.history.undo.last().is_some_and(|(_, p)| Arc::ptr_eq(p, &self.snap));
-        if !latest_is_turn {
+        if !self.is_latest(s) {
             return false;
         }
         s.execute("edit.undo", serde_json::json!({})).is_ok() && !self.changed(s)

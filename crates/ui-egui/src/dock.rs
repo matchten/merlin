@@ -55,10 +55,12 @@ pub enum PanelKind {
     CreateNullsFromPaths,
     /// Window ▸ VR Comp Editor (our own panel).
     VrCompEditor,
+    /// Window ▸ Merlin: the in-app AI agent (this fork's panel).
+    Merlin,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 34] = [
+    pub const ALL: [PanelKind; 35] = [
         PanelKind::Project,
         PanelKind::EffectControls,
         PanelKind::Composition,
@@ -93,6 +95,7 @@ impl PanelKind {
         PanelKind::ContentAwareFill,
         PanelKind::CreateNullsFromPaths,
         PanelKind::VrCompEditor,
+        PanelKind::Merlin,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -132,6 +135,7 @@ impl PanelKind {
             PanelKind::ContentAwareFill => "Content-Aware Fill",
             PanelKind::CreateNullsFromPaths => "Create Nulls From Paths",
             PanelKind::VrCompEditor => "VR Comp Editor",
+            PanelKind::Merlin => "Merlin",
         }
     }
     pub fn id(self) -> String {
@@ -697,7 +701,7 @@ mod tests {
             }
         }
         let all = Workspace::new(workspace("All Panels"));
-        for p in PanelKind::ALL.iter().filter(|p| !matches!(p, ScriptConsole | EssentialGraphics | MaskInterpolation)) {
+        for p in PanelKind::ALL.iter().filter(|p| !matches!(p, ScriptConsole | EssentialGraphics | MaskInterpolation | Merlin)) {
             assert!(all.is_open(*p), "All Panels lacks {p:?}");
         }
         // No built-in workspace uses accordions: right columns are frames split vertically.

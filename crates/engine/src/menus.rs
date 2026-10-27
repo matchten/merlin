@@ -1204,6 +1204,7 @@ Window
   Lumetri Scopes | window.panel {"panel":"lumetriScopes"}
   Mask Interpolation | window.panel {"panel":"maskInterpolation"}
   Media Browser | window.panel {"panel":"mediaBrowser"}
+  Merlin | window.panel {"panel":"merlin"}
   Metadata | window.panel {"panel":"metadata"}
   Motion Sketch | window.panel {"panel":"motionSketch"}
   Paint | window.panel {"panel":"paint"} | Cmd+8

@@ -1803,6 +1803,7 @@ dependencies = [
  "image",
  "kurbo",
  "log",
+ "merlin-agent",
  "pollster 1.0.1",
  "rayon",
  "serde",

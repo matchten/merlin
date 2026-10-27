@@ -15,10 +15,12 @@ pub enum ProviderKind {
     Gemini,
     /// Any other OpenAI-compatible endpoint (OpenRouter, Ollama, LM Studio…) at `base_url`.
     Custom,
+    /// A scripted stand-in that needs no network or key: tries the panel end to end offline.
+    Demo,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 4] = [ProviderKind::Anthropic, ProviderKind::OpenAi, ProviderKind::Gemini, ProviderKind::Custom];
+    pub const ALL: [ProviderKind; 5] = [ProviderKind::Anthropic, ProviderKind::OpenAi, ProviderKind::Gemini, ProviderKind::Custom, ProviderKind::Demo];
 
     /// Stable id (keychain entry name, [`crate::conversation::Native::provider`]).
     pub fn id(self) -> &'static str {
@@ -27,6 +29,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => "openai",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Custom => "custom",
+            ProviderKind::Demo => "demo",
         }
     }
 
@@ -36,6 +39,7 @@ impl ProviderKind {
             ProviderKind::OpenAi => "OpenAI",
             ProviderKind::Gemini => "Google Gemini",
             ProviderKind::Custom => "OpenAI-compatible",
+            ProviderKind::Demo => "Demo (offline)",
         }
     }
 
@@ -45,7 +49,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::OpenAi => "OPENAI_API_KEY",
             ProviderKind::Gemini => "GEMINI_API_KEY",
-            ProviderKind::Custom => "MERLIN_API_KEY",
+            ProviderKind::Custom | ProviderKind::Demo => "MERLIN_API_KEY",
         }
     }
 
@@ -56,21 +60,23 @@ impl ProviderKind {
             ProviderKind::OpenAi => "https://api.openai.com/v1",
             ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
             ProviderKind::Custom => "http://localhost:11434/v1",
+            ProviderKind::Demo => "",
         }
     }
 
     /// Whether a key is required (local servers usually take none).
     pub fn needs_key(self) -> bool {
-        self != ProviderKind::Custom
+        !matches!(self, ProviderKind::Custom | ProviderKind::Demo)
     }
 
     /// Suggested models, the default first. Any other model id can be typed in.
     pub fn presets(self) -> &'static [&'static str] {
         match self {
             ProviderKind::Anthropic => &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
-            ProviderKind::OpenAi => &["gpt-5"],
+            ProviderKind::OpenAi => &["gpt-5-mini", "gpt-5.4-mini", "gpt-5.5", "gpt-5.4", "gpt-5-nano"],
             ProviderKind::Gemini => &["gemini-2.5-pro", "gemini-2.5-flash"],
             ProviderKind::Custom => &[],
+            ProviderKind::Demo => &["demo"],
         }
     }
 }
