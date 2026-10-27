@@ -41,7 +41,12 @@ const CHIPS_H: f32 = 28.0;
 /// Messages from a turn's worker thread.
 enum WorkerMsg {
     Event(AgentEvent),
-    Done { outcome: TurnOutcome, conversation: Vec<Message> },
+    /// What the turn is waiting on, shown in the working line (`None`: back to normal).
+    Status(Option<String>),
+    Done {
+        outcome: TurnOutcome,
+        conversation: Vec<Message>,
+    },
 }
 
 /// Attachment decodes and attach-dialog answers, from background threads.
@@ -58,6 +63,7 @@ struct Worker {
     rx: Receiver<WorkerMsg>,
     stopping_since: Option<f64>,
     tool_calls: usize,
+    status: Option<String>,
 }
 
 /// What the panel keeps outside its serialized state.
@@ -189,7 +195,16 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let (ctx_req, ctx_ev, cancel_req, cancel_turn) = (ctx.clone(), ctx.clone(), cancel.clone(), cancel.clone());
     let spawned = std::thread::Builder::new().name("merlin-turn".into()).spawn(move || {
         // The keychain is read here, off the UI thread (macOS may ask the user first).
-        let key = if cfg.provider.needs_key() || cfg.provider == ProviderKind::Custom { keys::get(cfg.provider).0.unwrap_or_default() } else { String::new() };
+        let key = if cfg.provider.needs_key() || cfg.provider == ProviderKind::Custom {
+            // macOS may show a keychain permission dialog first (again after each app update).
+            let _ = ev_tx.send(WorkerMsg::Status(Some(tr("Reading the API key from the keychain… if macOS asks, allow access.").to_string())));
+            ctx_ev.request_repaint();
+            let key = keys::get(cfg.provider).0.unwrap_or_default();
+            let _ = ev_tx.send(WorkerMsg::Status(None));
+            key
+        } else {
+            String::new()
+        };
         let provider = providers::build(&cfg, key, Arc::new(transport::Http::default()));
         let mut host = RemoteHost::new(move |method: &str, params: Value| {
             if cancel_req.load(Ordering::Relaxed) {
@@ -218,7 +233,7 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     });
     match spawned {
         Ok(_) => {
-            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0 });
+            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None });
             panel.busy = true;
         }
         Err(e) => notice(app, tr_args("Merlin couldn't start: {}", &[&e]), true),
@@ -544,12 +559,13 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
         }
         app.ui.merlin.rt.requests = Some((tx, rx));
     }
-    let Some(w) = app.ui.merlin.rt.worker.take() else { return };
+    let Some(mut w) = app.ui.merlin.rt.worker.take() else { return };
     let mut done = None;
     let mut events = vec![];
     while let Ok(m) = w.rx.try_recv() {
         match m {
             WorkerMsg::Event(e) => events.push(e),
+            WorkerMsg::Status(s) => w.status = s,
             WorkerMsg::Done { outcome, conversation } => {
                 done = Some((outcome, conversation));
                 break;
@@ -812,7 +828,11 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Vec<A
             ui.add_space(6.0);
         }
         if let Some(w) = panel.rt.worker.as_ref() {
-            let what = if w.stopping_since.is_some() { tr("Stopping…") } else { tr("Merlin is working… edits appear live.") };
+            let what = match (&w.stopping_since, &w.status) {
+                (Some(_), _) => tr("Stopping…").to_string(),
+                (None, Some(s)) => s.clone(),
+                (None, None) => tr("Merlin is working… edits appear live.").to_string(),
+            };
             ui.label(RichText::new(what).small().color(t.accent));
         }
     });
