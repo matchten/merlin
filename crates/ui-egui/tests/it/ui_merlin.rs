@@ -212,7 +212,7 @@ fn merlin_sends_attached_images_with_the_message() {
     assert!(h.state().ui.merlin.attachments.is_empty(), "sent with the message");
     wait_idle(&mut h);
     let items = h.state().ui.merlin.items.clone();
-    let Some(ChatItem::User { text, attachments }) = items.first() else { panic!("{items:#?}") };
+    let Some(ChatItem::User { text, attachments, .. }) = items.first() else { panic!("{items:#?}") };
     assert!(text.is_empty());
     assert_eq!(attachments, &paths[..2]);
     assert!(
@@ -361,4 +361,128 @@ fn merlin_snapshot() {
     h.run_steps(4);
     let img = h.render().expect("render");
     img.save(&out).unwrap();
+}
+
+/// Drag from `a` to `b` in a few moves, holding `modifiers` (pressed once the drag is under way,
+/// as the other drag tests do).
+fn drag(h: &mut Harness<'_, EffectcraftApp>, a: egui::Pos2, b: egui::Pos2, modifiers: egui::Modifiers) {
+    h.event(egui::Event::PointerMoved(a));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    for k in 1..=6 {
+        h.event(egui::Event::PointerMoved(a + (b - a) * (k as f32 / 6.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(3);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+}
+
+fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
+    let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}")).clone();
+    egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
+}
+
+/// The storyboard strip: scrub, drop a note on a frame and one on a range, mark an area, apply them
+/// (the demo reports each one handled), and the chat shows what was applied.
+#[test]
+fn storyboard_notes_are_written_on_the_strip_and_applied_as_a_turn() {
+    use merlin_agent::notes::NoteStatus;
+    let mut h = harness();
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    h.state_mut()
+        .session
+        .execute("script.run", serde_json::json!({"code": "var c = app.project.items.addComp('Board', 640, 360, 1, 4, 30); c.openInViewer(); c.layers.addSolid([0.2,0.4,0.9], 'Blue', 640, 360, 1);"}))
+        .unwrap();
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.strip").is_none(), "collapsed by default");
+    click(&mut h, "merlin.strip.toggle");
+    assert!(h.state().ui.merlin.strip_open);
+    h.run_steps(2);
+
+    // A click on the strip moves the current time there (snapped to a frame).
+    click(&mut h, "merlin.strip");
+    let t = h.state().session.time().seconds();
+    assert!((t - 2.0).abs() < 0.1, "clicked the middle of a 4 s comp: {t}");
+
+    // + Note: a note at the current time, its editor open and focused for typing.
+    click(&mut h, "merlin.note.add");
+    let notes = h.state().ui.merlin.notes.clone();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(h.state().ui.merlin.editing_note, Some(notes[0].id));
+    assert!((notes[0].start.seconds() - t).abs() < 1e-6 && notes[0].end.is_none());
+    h.input_mut().events.push(egui::Event::Text("Make the blue warmer".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().ui.merlin.notes[0].text, "Make the blue warmer");
+    assert!(h.state().auto.find("merlin.notes.apply").is_some(), "a written note can be applied");
+
+    // Mark an area of its frame: the frame replaces the chat; drag a box; Done.
+    click(&mut h, "merlin.note.mark");
+    assert!(h.state().ui.merlin.marking_note.is_some());
+    let area = rect_of(&h, "merlin.mark.area");
+    drag(&mut h, area.lerp_inside(egui::vec2(0.25, 0.25)), area.lerp_inside(egui::vec2(0.5, 0.75)), egui::Modifiers::NONE);
+    let [x, y, w, hh] = h.state().ui.merlin.notes[0].region.expect("an area was marked");
+    assert!((x - 160.0).abs() < 8.0 && (y - 90.0).abs() < 8.0 && (w - 160.0).abs() < 8.0 && (hh - 180.0).abs() < 8.0, "{:?}", [x, y, w, hh]);
+    click(&mut h, "merlin.mark.done");
+    assert!(h.state().ui.merlin.marking_note.is_none());
+
+    // Shift-drag on the strip: a range note from 0.4 s to 1.2 s (the strip has grown a notes list).
+    let film = rect_of(&h, "merlin.strip");
+    let a = egui::pos2(film.min.x + film.width() * 0.1, film.center().y);
+    let b = egui::pos2(film.min.x + film.width() * 0.3, film.center().y);
+    drag(&mut h, a, b, egui::Modifiers::SHIFT);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert_eq!(notes.len(), 2, "{notes:#?}");
+    let range = notes[1].clone();
+    let (s, e) = range.span();
+    assert!((s.seconds() - 0.4).abs() < 0.07 && (e.seconds() - 1.2).abs() < 0.07, "{s:?}..{e:?}");
+    h.input_mut().events.push(egui::Event::Text("Slower here".into()));
+    h.run_steps(2);
+
+    // An empty note isn't sent; delete it.
+    click(&mut h, "merlin.note.add");
+    let empty = h.state().ui.merlin.notes.last().unwrap().id;
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.note.{empty}.delete"));
+    assert_eq!(h.state().ui.merlin.notes.len(), 2);
+    h.run_steps(2);
+
+    // Apply: one turn; the demo looks at the notes' frames and resolves each one.
+    click(&mut h, "merlin.notes.apply");
+    assert!(h.state().ui.merlin.busy);
+    assert!(h.state().ui.merlin.notes.iter().all(|n| n.status == NoteStatus::Sent));
+    wait_idle(&mut h);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| matches!(n.status, NoteStatus::Addressed { .. })), "{notes:#?}");
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[0], ChatItem::User { text, notes, .. } if text.is_empty() && notes.len() == 2), "{items:#?}");
+    let resolved = items.iter().filter(|i| matches!(i, ChatItem::Tool { name, state: ToolState::Done, .. } if name == "resolve_note")).count();
+    assert_eq!(resolved, 2, "{items:#?}");
+    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "nothing left to apply");
+    assert!(matches!(items.last(), Some(ChatItem::Turn { label, .. }) if label == "Merlin: Apply 2 notes"));
+}
+
+/// Agents and scripts add notes and apply them through `ui.set {"merlin": …}`.
+#[test]
+fn the_control_channel_adds_and_applies_notes() {
+    let mut h = harness();
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1, "text": "x"}})).unwrap_err().contains("no composition"));
+    h.state_mut().session.execute("script.run", serde_json::json!({"code": "app.project.items.addComp('C', 320, 180, 1, 3, 25).openInViewer();"})).unwrap();
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"note": {"text": "x"}})).unwrap_err().contains("time"));
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"applyNotes": true})).unwrap_err().contains("nothing to send"));
+    set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 2.0, "end": 0.5, "text": "fade out here", "region": [1, 2, 3, 4], "layers": [99]}})).unwrap();
+    let n = h.state().ui.merlin.notes[0].clone();
+    assert_eq!((n.start.seconds(), n.end.map(|e| e.seconds())), (0.5, Some(2.0)), "a reversed range is put in order");
+    assert_eq!((n.region, n.layers.clone()), (Some([1.0, 2.0, 3.0, 4.0]), vec![99]));
+    set(h.state_mut(), &ctx, &serde_json::json!({"applyNotes": true})).unwrap();
+    wait_idle(&mut h);
+    assert!(matches!(h.state().ui.merlin.notes[0].status, merlin_agent::notes::NoteStatus::Addressed { .. }));
+    set(h.state_mut(), &ctx, &serde_json::json!({"removeNote": n.id})).unwrap();
+    assert!(h.state().ui.merlin.notes.is_empty());
 }

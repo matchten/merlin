@@ -50,12 +50,12 @@ enum Act {
 
 /// The panel's colours, derived from the theme so light and dark both work.
 #[derive(Clone, Copy)]
-struct Look {
-    t: Tokens,
+pub(super) struct Look {
+    pub(super) t: Tokens,
     /// Merlin's mark and accents (a soft violet).
-    magic: Color32,
-    card: Color32,
-    border: Color32,
+    pub(super) magic: Color32,
+    pub(super) card: Color32,
+    pub(super) border: Color32,
     code_bg: Color32,
 }
 
@@ -78,13 +78,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let chips = if app.ui.merlin.attachments.is_empty() { 0.0 } else { app.ui.merlin.rt.chips_h.max(CHIPS_H) + 2.0 };
     let footer_h = (148.0 + chips).min(rect.height() * 0.6);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
-    let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
+    let middle = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
+    let strip_h = super::strip::height(app, middle.height());
+    let body = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.max.y - strip_h));
+    let strip = Rect::from_min_max(pos2(rect.min.x, body.max.y), middle.max);
     let mut acts = vec![];
     header_ui(app, ui, header, &look, now, &mut acts);
     if app.ui.merlin.settings_open {
-        settings_ui(app, ui, Rect::from_min_max(body.min, rect.max), &look, &mut acts);
+        settings_ui(app, ui, Rect::from_min_max(middle.min, rect.max), &look, &mut acts);
     } else {
-        log_ui(app, ui, body, &look, now, &mut acts);
+        if app.ui.merlin.marking_note.is_some() {
+            super::strip::mark_ui(app, ui, body, &look);
+        } else {
+            log_ui(app, ui, body, &look, now, &mut acts);
+        }
+        super::strip::show(app, ui, strip, &look);
         composer_ui(app, ui, footer, &look, now, &mut acts);
     }
     if std::mem::take(&mut app.ui.merlin.rt.drop_hover) {
@@ -124,7 +132,7 @@ fn input_id() -> egui::Id {
     egui::Id::unique("merlin-input")
 }
 
-fn child(ui: &mut egui::Ui, r: Rect) -> egui::Ui {
+pub(super) fn child(ui: &mut egui::Ui, r: Rect) -> egui::Ui {
     ui.new_child(egui::UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Min)))
 }
 
@@ -167,13 +175,13 @@ fn shimmer(ui: &mut egui::Ui, text: &str, size: f32, look: &Look, now: f64) {
     ui.ctx().request_repaint();
 }
 
-fn lerp(a: Color32, b: Color32, k: f32) -> Color32 {
+pub(super) fn lerp(a: Color32, b: Color32, k: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round().clamp(0.0, 255.0) as u8;
     Color32::from_rgba_unmultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }
 
 /// A rounded icon button; `on` draws it highlighted.
-fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
+pub(super) fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
     let resp = ui.interact(r, egui::Id::unique(("merlin-btn", id)), if enabled { Sense::click() } else { Sense::hover() });
     let t = &look.t;
     let hot = ui.ctx().animate_bool_with_time(resp.id, enabled && resp.hovered(), 0.12);
@@ -197,7 +205,7 @@ fn icon_btn(ui: &mut egui::Ui, r: Rect, icon: Icon, on: bool, enabled: bool, loo
 }
 
 /// A pill button: `primary` is filled with the accent, else outlined.
-fn pill(ui: &mut egui::Ui, label: &str, primary: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
+pub(super) fn pill(ui: &mut egui::Ui, label: &str, primary: bool, enabled: bool, look: &Look, id: &str) -> egui::Response {
     let t = &look.t;
     let galley = ui.painter().layout_no_wrap(label.to_string(), Tokens::medium(12.0), Color32::WHITE);
     let size = vec2(galley.size().x + 26.0, 26.0);
@@ -317,7 +325,7 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     });
                 }
                 match item {
-                    ChatItem::User { text, attachments } => {
+                    ChatItem::User { text, attachments, notes } => {
                         ui.add_space(4.0);
                         egui::Frame::new()
                             .fill(look.card)
@@ -329,6 +337,16 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                                 if !attachments.is_empty() {
                                     let keys: Vec<String> = attachments.iter().map(|p| format!("att:{p}")).collect();
                                     thumbnails(ui, &ctx, &mut panel.rt, &keys, 72.0);
+                                }
+                                if !notes.is_empty() {
+                                    let n = notes.len();
+                                    ui.horizontal(|ui| {
+                                        let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                                        icons::paint(ui.painter(), r, Icon::Chat, Color32::from_rgb(0xff, 0xb8, 0x00));
+                                        let what =
+                                            if n == 1 { tr("Applied 1 storyboard note").to_string() } else { tr_args("Applied {} storyboard notes", &[&n]) };
+                                        ui.label(RichText::new(what).font(Tokens::medium(11.5)).color(t.text_dim));
+                                    });
                                 }
                                 if !text.is_empty() {
                                     ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(BODY)).color(t.text)).wrap());
@@ -544,6 +562,11 @@ fn tool_title(name: &str, state: ToolState, input: &str, frames: usize) -> (Icon
         "add_effect" => (Icon::Fx, pick(tr("Adding an effect…"), tr_args("Added {}", &[&arg("effect").unwrap_or_else(|| tr("an effect").into())]))),
         "list_effects" | "list_fonts" | "list_commands" | "describe_command" => (Icon::Search, pick(tr("Looking things up…"), tr("Looked things up").into())),
         "import_file" => (Icon::Image, pick(tr("Importing a file…"), tr("Imported a file").into())),
+        "resolve_note" => {
+            let id = serde_json::from_str::<Value>(input).ok().and_then(|v| v.get("id").and_then(Value::as_u64)).unwrap_or(0);
+            let declined = input.contains("wont_fix");
+            (Icon::Chat, pick(tr("Resolving a note…"), if declined { tr_args("Declined note {}", &[&id]) } else { tr_args("Resolved note {}", &[&id]) }))
+        }
         other => (Icon::Gear, other.to_string()),
     }
 }
@@ -719,7 +742,7 @@ fn tokens(n: u64) -> String {
 }
 
 /// The textures of the images under `key` in [`Runtime::frames`], made on first use.
-fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
+pub(super) fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
     if !rt.textures.contains_key(key) {
         let texs: Vec<egui::TextureHandle> = rt
             .frames
@@ -829,7 +852,7 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         );
     }
     let send = Rect::from_center_size(pos2(bar.max.x - 14.0, bar.center().y), vec2(26.0, 26.0));
-    let enabled = busy || native::can_send(&app.ui.merlin);
+    let enabled = busy || native::can_send(app);
     let sresp = ui.interact(send, egui::Id::unique("merlin-send"), if enabled { Sense::click() } else { Sense::hover() });
     let hot = ui.ctx().animate_bool_with_time(sresp.id, enabled && sresp.hovered(), 0.12);
     let p = ui.painter();
@@ -887,12 +910,12 @@ fn context_chips(app: &EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look) 
                 [one] => chip(Icon::TextLayer, short(one, 22), &mut x),
                 _ => chip(Icon::TextLayer, tr_args("{} layers", &[&names.len()]), &mut x),
             }
-            chip(Icon::Stopwatch, format!("{:.2}s", s.time().seconds()), &mut x);
+            chip(Icon::Stopwatch, crate::panels::timecode(s, comp, s.time()), &mut x);
         }
     }
 }
 
-fn short(s: &str, n: usize) -> String {
+pub(super) fn short(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) } else { s.to_string() }
 }
 

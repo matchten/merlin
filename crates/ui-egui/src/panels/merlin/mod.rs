@@ -12,6 +12,8 @@ pub(crate) mod markdown;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
+mod strip;
+#[cfg(not(target_arch = "wasm32"))]
 mod view;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use native::Runtime;
@@ -35,6 +37,15 @@ pub struct MerlinPanel {
     pub attachments: Vec<Attached>,
     /// A turn is running.
     pub busy: bool,
+    /// Notes on moments of the timeline (the storyboard strip), applied together as a turn.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub notes: Vec<merlin_agent::notes::Note>,
+    /// The storyboard strip is expanded.
+    pub strip_open: bool,
+    /// The note whose editor is open.
+    pub editing_note: Option<u64>,
+    /// The note whose area is being marked on its frame (the frame replaces the conversation).
+    pub marking_note: Option<u64>,
     #[serde(skip)]
     pub(crate) rt: Runtime,
 }
@@ -103,6 +114,9 @@ pub enum ChatItem {
         /// Paths of the files sent with it (thumbnails are kept by the runtime).
         #[serde(default)]
         attachments: Vec<String>,
+        /// Ids of the notes it applied.
+        #[serde(default)]
+        notes: Vec<u64>,
     },
     Assistant {
         text: String,
