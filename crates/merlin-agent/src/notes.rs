@@ -30,6 +30,8 @@ pub enum NoteStatus {
     WontFix {
         summary: String,
     },
+    /// A beat of a plan Merlin proposed, waiting for Build.
+    Proposed,
 }
 
 impl NoteStatus {
@@ -98,7 +100,8 @@ pub fn block(briefs: &[NoteBrief]) -> String {
             Some(u) => format!("from {} to {}", b.at, u),
             None => format!("at {}", b.at),
         };
-        out.push_str(&format!("- Note {} {when}", n.id));
+        let beat = if n.author == Author::Merlin { " (a beat of the plan the user approved)" } else { "" };
+        out.push_str(&format!("- Note {}{beat} {when}", n.id));
         if !b.layers.is_empty() {
             out.push_str(&format!(", about {}", b.layers.join(", ")));
         }

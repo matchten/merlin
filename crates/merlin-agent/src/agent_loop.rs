@@ -46,6 +46,11 @@ pub enum AgentEvent {
         id: u64,
         png: Vec<u8>,
     },
+    /// Plan mode: the agent proposed a plan.
+    PlanProposed {
+        title: String,
+        beats: Vec<Beat>,
+    },
     /// The agent reported a note done (`addressed`) or declined it, with its frame as it looks now.
     NoteResolved {
         id: u64,
@@ -64,7 +69,24 @@ pub struct TurnContext {
     pub notes: Vec<NoteBrief>,
     /// What the user pinned with `@`: the lines of a `<pins>` block, and the frames to show.
     pub pins: Vec<PinBrief>,
+    /// Plan mode: only reading tools, and the answer is a plan ([`tools::PROPOSE_PLAN`]).
+    pub plan_mode: bool,
+    /// Plan mode: the current plan as the user may have edited it (a `<current_plan>` block).
+    pub current_plan: Option<String>,
 }
+
+/// One beat of a proposed plan.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Beat {
+    /// Comp seconds.
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub layers: Vec<String>,
+}
+
+/// How plan mode is explained to the model, in the user message (the system prompt stays cached).
+const PLAN_MODE: &str = "<mode>plan</mode>\nPlan mode is on: you can inspect the project and render frames, but not edit. Work out how you would build this request, then call propose_plan once with the piece as timed beats (comp seconds, in order, covering the whole piece). Afterwards reply with one or two sentences; don't build anything. If a <current_plan> is given, revise it as the user asks, keeping what they didn't mention.";
 
 /// One thing the user pinned to the message (a layer, a frame, a range, a note).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -127,11 +149,17 @@ pub fn run_turn_with(
 ) -> TurnOutcome {
     let mut parts = user;
     parts.extend(pin_parts(host, ctx, cfg.frame_max_side()));
+    if ctx.plan_mode {
+        if let Some(plan) = &ctx.current_plan {
+            parts.push(Part::Text { text: format!("<current_plan>\n{}\n</current_plan>", plan.trim()) });
+        }
+        parts.push(Part::Text { text: PLAN_MODE.to_string() });
+    }
     parts.extend(note_parts(host, ctx, cfg.frame_max_side(), on_event));
     parts.push(Part::Text { text: context::snapshot_at(host, ctx.time.as_deref()) });
     conversation.push(Message::user(parts));
 
-    let specs = tools::specs();
+    let specs = if ctx.plan_mode { tools::plan_specs() } else { tools::specs() };
     let mut usage = Usage::default();
     let mut tool_calls = 0usize;
     let end = 'turn: {
@@ -177,7 +205,11 @@ pub fn run_turn_with(
                     continue;
                 }
                 on_event(AgentEvent::ToolRunning { id: id.clone(), name: name.clone(), input: input.clone() });
-                let out = if name == tools::RESOLVE_NOTE {
+                let out = if ctx.plan_mode && name != tools::PROPOSE_PLAN && !tools::is_read_only(&name) {
+                    ToolOutput::error(format!("`{name}` is off in plan mode: nothing can be edited yet. Propose the plan with propose_plan."))
+                } else if name == tools::PROPOSE_PLAN {
+                    propose_plan(&input, ctx.plan_mode, on_event)
+                } else if name == tools::RESOLVE_NOTE {
                     resolve_note(host, ctx, &input, cfg.frame_max_side(), on_event)
                 } else {
                     tools::run(host, &name, &input, cfg.frame_max_side())
@@ -244,6 +276,37 @@ fn note_parts(host: &mut dyn Host, ctx: &TurnContext, max_side: u32, on_event: &
     }
     parts.push(Part::Text { text: notes::block(&ctx.notes) });
     parts
+}
+
+/// The `propose_plan` tool: hand the beats to the panel.
+fn propose_plan(input: &Value, plan_mode: bool, on_event: &mut dyn FnMut(AgentEvent)) -> ToolOutput {
+    if !plan_mode {
+        return ToolOutput::error("propose_plan only works in plan mode");
+    }
+    let title = input.get("title").and_then(Value::as_str).unwrap_or("Plan").trim().to_string();
+    let mut beats: Vec<Beat> = input
+        .get("beats")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| {
+            let start = b.get("start").and_then(Value::as_f64)?.max(0.0);
+            let end = b.get("end").and_then(Value::as_f64).unwrap_or(start).max(start);
+            let text = b.get("text").and_then(Value::as_str)?.trim().to_string();
+            let layers =
+                b.get("layers").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+            (!text.is_empty() && start.is_finite() && end.is_finite()).then_some(Beat { start, end, text, layers })
+        })
+        .take(40)
+        .collect();
+    if beats.is_empty() {
+        return ToolOutput::error("the plan needs at least one beat with start, end (comp seconds) and text");
+    }
+    beats.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let n = beats.len();
+    on_event(AgentEvent::PlanProposed { title, beats });
+    ToolOutput::json(json!({"shown": n, "note": "The user now sees the plan on the storyboard and can edit it, comment, or build it. Reply briefly and stop."}))
 }
 
 /// The `resolve_note` tool: tell the panel, and show the note's frame as it looks now.

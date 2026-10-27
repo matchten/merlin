@@ -188,6 +188,45 @@ pub fn specs() -> Vec<ToolSpec> {
 
 /// The tool that reports a note done; the turn loop runs it (it talks to the panel, not the engine).
 pub const RESOLVE_NOTE: &str = "resolve_note";
+/// Plan mode's answer: the beats of a plan, shown to the user to edit and approve.
+pub const PROPOSE_PLAN: &str = "propose_plan";
+
+/// Tools that only read (plan mode offers just these, and [`PROPOSE_PLAN`]).
+pub fn is_read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_commands" | "describe_command" | "get_project" | "get_comp" | "get_layer" | "get_property" | "list_effects" | "list_fonts" | "render_frames"
+    )
+}
+
+/// The plan-mode catalogue: the read-only tools and [`PROPOSE_PLAN`].
+pub fn plan_specs() -> Vec<ToolSpec> {
+    let mut v: Vec<ToolSpec> = specs().into_iter().filter(|t| is_read_only(t.name)).collect();
+    v.push(ToolSpec {
+        name: PROPOSE_PLAN,
+        description: "Plan mode: propose the piece as a sequence of timed beats for the user to review, edit and approve before anything is built. Each beat covers a comp-time range and says what happens then (which layers, what motion, easing, colour). Cover the whole piece in order. Keep each beat to one or two short sentences a motion designer can scan. Call it once, then stop.",
+        input_schema: schema(
+            json!({
+                "title": {"type": "string", "description": "A short name for the plan."},
+                "beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {"type": "number", "description": "Comp seconds."},
+                            "end": {"type": "number", "description": "Comp seconds."},
+                            "text": {"type": "string", "description": "What happens in this beat."},
+                            "layers": {"type": "array", "items": {"type": "string"}, "description": "Names of the layers involved (existing or to create)."}
+                        },
+                        "required": ["start", "end", "text"]
+                    }
+                }
+            }),
+            &["title", "beats"],
+        ),
+    });
+    v
+}
 
 /// Most frames one `render_frames` call returns (each is input tokens for the model).
 pub const MAX_FRAMES: usize = 8;
@@ -225,6 +264,7 @@ pub fn run(host: &mut dyn Host, name: &str, input: &Value, frame_max_side: u32) 
         "render_frames" => render_frames(host, input, frame_max_side),
         "import_file" => import_file(host, input),
         RESOLVE_NOTE => Err("resolve_note only works during a turn that has notes".into()),
+        PROPOSE_PLAN => Err("propose_plan only works in plan mode".into()),
         other => Err(format!("unknown tool `{other}`")),
     };
     r.unwrap_or_else(ToolOutput::error)

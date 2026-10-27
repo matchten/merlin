@@ -463,7 +463,7 @@ fn notes_travel_as_frames_and_come_back_resolved() {
     // Resolving a note the turn doesn't know is an error the model can read.
     let mut stray = vec![];
     let bad = merlin_agent::agent_loop::run_turn_with(
-        &Fixed(json!({"id": 77, "status": "addressed", "summary": "x"})),
+        &Fixed2("resolve_note", json!({"id": 77, "status": "addressed", "summary": "x"})),
         &mut h,
         &cfg,
         &mut vec![],
@@ -479,34 +479,6 @@ fn notes_travel_as_frames_and_come_back_resolved() {
         ),
         "{stray:?}"
     );
-}
-
-/// Calls `resolve_note` once with a fixed input, then finishes.
-struct Fixed(Value);
-
-impl LlmProvider for Fixed {
-    fn name(&self) -> &'static str {
-        "fixed"
-    }
-
-    fn complete(
-        &self,
-        req: &ChatRequest,
-        _: &mut dyn FnMut(merlin_agent::provider::StreamEvent),
-        _: &AtomicBool,
-    ) -> merlin_agent::Result<merlin_agent::provider::Reply> {
-        let first = req.messages.last().is_some_and(|m| m.parts.iter().all(|p| !matches!(p, Part::ToolResult { .. })));
-        let parts = if first {
-            vec![Part::ToolCall { id: "c1".into(), name: "resolve_note".into(), input: self.0.clone() }]
-        } else {
-            vec![Part::Text { text: "ok".into() }]
-        };
-        Ok(merlin_agent::provider::Reply {
-            message: Message { role: Role::Assistant, parts, native: None },
-            stop: if first { StopReason::ToolUse } else { StopReason::EndTurn },
-            usage: Default::default(),
-        })
-    }
 }
 
 #[test]
@@ -546,4 +518,80 @@ fn pins_travel_as_frames_and_a_block() {
     let first = &conv[0].parts;
     assert!(matches!(&first[1], Part::Image { label: Some(l), .. } if l == "Pinned frame 0:00:00:15"), "{first:?}");
     assert!(matches!(&first[2], Part::Text { text } if text.starts_with("<pins>") && text.contains("- layer \"Title\" (id 2), locked\n- frame 0:00:00:15\n")));
+}
+
+#[test]
+fn plan_mode_reads_only_and_answers_with_beats() {
+    use merlin_agent::{TurnContext, run_turn_with};
+    let p = merlin_agent::providers::demo::Demo { chunk_delay: std::time::Duration::ZERO };
+    let mut h = host();
+    let before = h.session.project.clone();
+    let ctx = TurnContext { plan_mode: true, current_plan: Some("- 0–1 s: old beat".into()), ..TurnContext::default() };
+    let mut conv = vec![];
+    let mut events = vec![];
+    let cfg = AgentConfig { provider: ProviderKind::Demo, ..Default::default() };
+    let out =
+        run_turn_with(&p, &mut h, &cfg, &mut conv, vec![Part::Text { text: "Big Launch".into() }], &ctx, &mut |e| events.push(e), &AtomicBool::new(false));
+    assert_eq!(out.end, TurnEnd::Done);
+    assert!(Arc::ptr_eq(&h.session.project, &before), "nothing was built");
+    let plan = events.iter().find_map(|e| if let AgentEvent::PlanProposed { title, beats } = e { Some((title.clone(), beats.clone())) } else { None });
+    let (title, beats) = plan.expect("a plan");
+    assert_eq!(title, "Big Launch");
+    assert_eq!(beats.len(), 3);
+    assert!(beats.windows(2).all(|w| w[0].start <= w[1].start));
+    assert!(conv[0].parts.iter().any(|p| matches!(p, Part::Text { text } if text.contains("<current_plan>\n- 0–1 s: old beat"))));
+    // Plan mode offers no editing tools, and refuses them if called anyway.
+    let names: Vec<&str> = tools::plan_specs().iter().map(|t| t.name).collect();
+    assert!(names.contains(&"render_frames") && names.contains(&"propose_plan") && !names.contains(&"run_script") && !names.contains(&"execute_command"));
+    let mut ev = vec![];
+    run_turn_with(
+        &Fixed2("run_script", json!({"code": "app.project.items.addComp('X', 10, 10, 1, 1, 1);"})),
+        &mut h,
+        &cfg,
+        &mut vec![],
+        vec![Part::Text { text: "x".into() }],
+        &ctx,
+        &mut |e| ev.push(e),
+        &AtomicBool::new(false),
+    );
+    assert!(ev.iter().any(|e| matches!(e, AgentEvent::ToolFinished { is_error: true, summary, .. } if summary.contains("off in plan mode"))), "{ev:?}");
+    assert!(Arc::ptr_eq(&h.session.project, &before));
+    // Outside plan mode propose_plan is refused.
+    let mut ev = vec![];
+    run_turn_with(
+        &Fixed2("propose_plan", json!({"title": "t", "beats": []})),
+        &mut h,
+        &cfg,
+        &mut vec![],
+        vec![Part::Text { text: "x".into() }],
+        &TurnContext::default(),
+        &mut |e| ev.push(e),
+        &AtomicBool::new(false),
+    );
+    assert!(ev.iter().any(|e| matches!(e, AgentEvent::ToolFinished { is_error: true, .. })));
+}
+
+/// Calls one tool once with a fixed input, then finishes.
+struct Fixed2(&'static str, Value);
+
+impl LlmProvider for Fixed2 {
+    fn name(&self) -> &'static str {
+        "fixed"
+    }
+
+    fn complete(
+        &self,
+        req: &ChatRequest,
+        _: &mut dyn FnMut(merlin_agent::provider::StreamEvent),
+        _: &AtomicBool,
+    ) -> merlin_agent::Result<merlin_agent::provider::Reply> {
+        let first = req.messages.last().is_some_and(|m| m.parts.iter().all(|p| !matches!(p, Part::ToolResult { .. })));
+        let parts =
+            if first { vec![Part::ToolCall { id: "c1".into(), name: self.0.into(), input: self.1.clone() }] } else { vec![Part::Text { text: "ok".into() }] };
+        Ok(merlin_agent::provider::Reply {
+            message: Message { role: Role::Assistant, parts, native: None },
+            stop: if first { StopReason::ToolUse } else { StopReason::EndTurn },
+            usage: Default::default(),
+        })
+    }
 }

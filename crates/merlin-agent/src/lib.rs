@@ -37,7 +37,7 @@ pub mod sse;
 pub mod tools;
 pub mod transport;
 
-pub use agent_loop::{AgentEvent, PinBrief, TurnContext, TurnOutcome, run_turn, run_turn_with};
+pub use agent_loop::{AgentEvent, Beat, PinBrief, TurnContext, TurnOutcome, run_turn, run_turn_with};
 pub use config::{AgentConfig, ProviderKind};
 pub use conversation::{Message, Part, ResultPart, Role};
 pub use host::{HeadlessHost, Host, RemoteHost};

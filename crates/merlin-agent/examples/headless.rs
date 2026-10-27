@@ -10,6 +10,7 @@
 //! `--setup <js>` runs a script on the fresh project first; `--note "1.2:text"` or
 //! `--note "1-2.5:text"` (comp seconds) adds a timeline note to apply, as the panel's storyboard does.
 //!
+//! `--plan` runs the turn in plan mode (read-only; the answer is a plan of timed beats).
 //! `--lock-range 1-2` locks the turn's edits to that comp-time range, as a locked `@` range pin does.
 //!
 //! Output goes to `--out` (default `agent-out/`): `project.ecproj`, `frame-N.png`, `conversation.json`.
@@ -37,6 +38,7 @@ fn run() -> Result<(), String> {
     let mut setup = None;
     let mut note_args = vec![];
     let mut lock = None;
+    let mut plan = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -52,6 +54,7 @@ fn run() -> Result<(), String> {
             "--setup" => setup = args.next(),
             "--note" => note_args.push(args.next().unwrap_or_default()),
             "--lock-range" => lock = args.next(),
+            "--plan" => plan = true,
             _ => prompt.push(a),
         }
     }
@@ -94,6 +97,7 @@ fn run() -> Result<(), String> {
         notes.push(NoteBrief { note, at: label(a), until: b.map(label), layers: vec![], comp_size: size, send: true });
     }
     let mut ctx = TurnContext { time: Some(label(0.0)), notes, ..TurnContext::default() };
+    ctx.plan_mode = plan;
     let mut scope = None;
     if let Some(r) = lock {
         let (a, b) = r.split_once('-').ok_or("--lock-range: expected `start-end` in seconds")?;
@@ -131,6 +135,12 @@ fn run() -> Result<(), String> {
             }
             AgentEvent::Usage(u) => eprintln!("  [{} in ({} cached) · {} out]", u.total_input(), u.cache_read_tokens, u.output_tokens),
             AgentEvent::NoteFrame { .. } => {}
+            AgentEvent::PlanProposed { title, beats } => {
+                eprintln!("  plan “{title}”:");
+                for b in beats {
+                    eprintln!("    {:.2}–{:.2}s {}  [{}]", b.start, b.end, b.text, b.layers.join(", "));
+                }
+            }
             AgentEvent::NoteResolved { id, addressed, summary, .. } => {
                 eprintln!("  note {id} {}: {summary}", if addressed { "addressed" } else { "won't fix" })
             }
