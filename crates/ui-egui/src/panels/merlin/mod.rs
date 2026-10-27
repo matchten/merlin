@@ -8,12 +8,17 @@
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod markdown;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
+mod view;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use native::Runtime;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{apply_ui_set, attach_paths, show, take_main_window_files, take_window_files, tick};
+pub use native::{apply_ui_set, attach_paths, take_main_window_files, take_window_files, tick};
+#[cfg(not(target_arch = "wasm32"))]
+pub use view::show;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

@@ -119,7 +119,7 @@ impl LlmProvider for Demo {
             ),
             1 => ("Let me check the motion.".to_string(), Some((id(2), "render_frames", json!({"times": [0.2, 0.6, 1.2]}))), StopReason::ToolUse),
             _ => (
-                "Done: the title drops in from above, overshoots slightly at 0.6 s and settles at 1 s. Keep it, or Revert to undo the whole turn. Pick a real provider in settings to work with a model.".to_string(),
+                "**Done.** The title:\n- drops in from above\n- overshoots slightly at `0.6 s`\n- settles at `1 s`\n\nKeep it, or Revert to undo the whole turn. Pick a real provider in *Settings* to work with a model.".to_string(),
                 None,
                 StopReason::EndTurn,
             ),

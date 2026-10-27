@@ -327,6 +327,13 @@ impl egui::DroppedFile for Dropped {
 #[ignore]
 fn merlin_snapshot() {
     let mut h = harness();
+    let out = std::env::var("MERLIN_SNAPSHOT").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin.png").into());
+    if let Some(d) = std::path::Path::new(&out).parent() {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    // The empty panel first.
+    h.run_steps(4);
+    h.render().expect("render").save(out.replace(".png", "-empty.png")).unwrap();
     h.state_mut().ui.merlin.settings.provider = "demo".into();
     let d = temp_dir("snapshot");
     let board = d.join("moodboard.png");
@@ -353,9 +360,5 @@ fn merlin_snapshot() {
     h.state_mut().ui.merlin.input = "Add the logo bottom right".into();
     h.run_steps(4);
     let img = h.render().expect("render");
-    let out = std::env::var("MERLIN_SNAPSHOT").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin.png").into());
-    if let Some(d) = std::path::Path::new(&out).parent() {
-        std::fs::create_dir_all(d).unwrap();
-    }
     img.save(&out).unwrap();
 }
