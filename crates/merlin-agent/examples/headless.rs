@@ -10,6 +10,8 @@
 //! `--setup <js>` runs a script on the fresh project first; `--note "1.2:text"` or
 //! `--note "1-2.5:text"` (comp seconds) adds a timeline note to apply, as the panel's storyboard does.
 //!
+//! `--lock-range 1-2` locks the turn's edits to that comp-time range, as a locked `@` range pin does.
+//!
 //! Output goes to `--out` (default `agent-out/`): `project.ecproj`, `frame-N.png`, `conversation.json`.
 
 use std::sync::Arc;
@@ -34,6 +36,7 @@ fn run() -> Result<(), String> {
     let mut prompt = vec![];
     let mut setup = None;
     let mut note_args = vec![];
+    let mut lock = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -48,6 +51,7 @@ fn run() -> Result<(), String> {
             "--out" => out = args.next().unwrap_or_default().into(),
             "--setup" => setup = args.next(),
             "--note" => note_args.push(args.next().unwrap_or_default()),
+            "--lock-range" => lock = args.next(),
             _ => prompt.push(a),
         }
     }
@@ -89,7 +93,19 @@ fn run() -> Result<(), String> {
         };
         notes.push(NoteBrief { note, at: label(a), until: b.map(label), layers: vec![], comp_size: size, send: true });
     }
-    let ctx = TurnContext { time: Some(label(0.0)), notes, ..TurnContext::default() };
+    let mut ctx = TurnContext { time: Some(label(0.0)), notes, ..TurnContext::default() };
+    let mut scope = None;
+    if let Some(r) = lock {
+        let (a, b) = r.split_once('-').ok_or("--lock-range: expected `start-end` in seconds")?;
+        let (a, b) = (a.trim().parse::<f64>().map_err(|e| e.to_string())?, b.trim().parse::<f64>().map_err(|e| e.to_string())?);
+        let (ta, tb) = (effectcraft_time::Tick::from_seconds_f64(a), effectcraft_time::Tick::from_seconds_f64(b));
+        ctx.pins.push(merlin_agent::PinBrief {
+            line: format!("the time range {} to {}, locked: your edits must stay inside it", label(a), label(b)),
+            frames: vec![(comp, ta, format!("Pinned range start, {a:.2}s")), (comp, tb, format!("Pinned range end, {b:.2}s"))],
+        });
+        scope = Some(merlin_agent::guard::Scope { comp, layers: None, range: Some((ta, tb)) });
+    }
+    let mut host = Guarded { inner: host, scope };
 
     let mut conversation = vec![];
     let mut frame_n = 0;
@@ -122,6 +138,7 @@ fn run() -> Result<(), String> {
         &AtomicBool::new(false),
     );
     eprintln!("\n— {:?}, {} tool calls, {} output tokens", outcome.end, outcome.tool_calls, outcome.usage.output_tokens);
+    let mut host = host.inner;
     checkpoint.collapse(&mut host.session, &turn_label(&prompt));
 
     let path = out.join("project.ecproj");
@@ -130,4 +147,33 @@ fn run() -> Result<(), String> {
     std::fs::write(out.join("conversation.json"), conv).map_err(|e| e.to_string())?;
     eprintln!("saved {} (open it in EffectCraft) and {frame_n} frame(s)", path.display());
     Ok(())
+}
+
+/// The headless host with the panel's pin guard: an edit outside the locked range is undone and
+/// refused.
+struct Guarded {
+    inner: HeadlessHost,
+    scope: Option<merlin_agent::guard::Scope>,
+}
+
+impl Host for Guarded {
+    fn command(&mut self, id: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        let Some(scope) = self.scope.clone() else { return self.inner.command(id, params) };
+        let cp = Checkpoint::take(&self.inner.session);
+        let r = self.inner.command(id, params)?;
+        let out = merlin_agent::guard::check(cp.snapshot(), &self.inner.session.project, &scope, &|t| format!("{:.2}s", t.seconds()));
+        if out.is_empty() {
+            return Ok(r);
+        }
+        cp.discard(&mut self.inner.session);
+        eprintln!("  ⛔ refused: {}", out.join("; "));
+        Err(format!(
+            "Refused: this edit went outside what the user pinned and locked, so none of it was applied:\n- {}\nMake the change within the locked pins, or tell the user it needs them unlocked.",
+            out.join("\n- ")
+        ))
+    }
+
+    fn render(&mut self, comp: Option<&serde_json::Value>, time: Option<f64>, max_side: u32) -> Result<merlin_agent::host::Frame, String> {
+        self.inner.render(comp, time, max_side)
+    }
 }
