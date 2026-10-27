@@ -84,6 +84,7 @@ fn status_text(s: &NoteStatus) -> &'static str {
         NoteStatus::Sent => "With Merlin…",
         NoteStatus::Addressed { .. } => "Addressed",
         NoteStatus::WontFix { .. } => "Won't fix",
+        NoteStatus::Proposed => "Proposed",
     }
 }
 
@@ -441,10 +442,16 @@ fn list_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, r: 
                         let (dot, _) = ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
                         ui.painter().circle_filled(dot.center(), 3.5, col);
                         ui.label(RichText::new(&label).font(Tokens::semibold(11.5)).color(t.text));
-                        if n.author == Author::Merlin {
-                            ui.label(RichText::new(tr("Merlin")).font(Tokens::ui(10.5)).color(look.magic));
+                        // Open notes need no status; a plan's beats say so.
+                        match (&n.status, n.author) {
+                            (NoteStatus::Open, Author::User) => {}
+                            (NoteStatus::Proposed | NoteStatus::Open, Author::Merlin) => {
+                                ui.label(RichText::new(tr("Beat")).font(Tokens::ui(10.5)).color(look.magic));
+                            }
+                            (st, _) => {
+                                ui.label(RichText::new(tr(status_text(st))).font(Tokens::ui(10.5)).color(t.text_faint));
+                            }
                         }
-                        ui.label(RichText::new(tr(status_text(&n.status))).font(Tokens::ui(10.5)).color(t.text_faint));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (x, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
                             if icon_btn(ui, x, Icon::Trash, false, true, look, &format!("note-del-{}", n.id)).on_hover_text(tr("Delete note")).clicked() {

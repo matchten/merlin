@@ -50,6 +50,8 @@ pub struct MerlinPanel {
     pub marking_note: Option<u64>,
     /// What the next message is pinned to (`@` mentions, or a click on a context chip).
     pub pins: Vec<Pin>,
+    /// Act (build) or Plan (propose timed beats first).
+    pub mode: Mode,
     #[serde(skip)]
     pub(crate) rt: Runtime,
 }
@@ -66,6 +68,28 @@ pub struct MerlinSettings {
     pub base_url: String,
     /// Anthropic effort: `low` … `max`; empty means `high`.
     pub effort: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Mode {
+    /// Merlin builds right away.
+    #[default]
+    Act,
+    /// Merlin only looks, and answers with a plan of timed beats to edit and approve.
+    Plan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlanState {
+    /// Waiting for Build or Discard (or a revision).
+    Proposed,
+    Building,
+    Built,
+    Discarded,
+    /// A later plan replaced it.
+    Revised,
 }
 
 /// Something the next message is pinned to.
@@ -192,6 +216,13 @@ pub enum ChatItem {
     Notice {
         text: String,
         error: bool,
+    },
+    /// A plan Merlin proposed: its beats are notes on the storyboard.
+    Plan {
+        title: String,
+        /// The beats' note ids, in time order.
+        beats: Vec<u64>,
+        state: PlanState,
     },
 }
 

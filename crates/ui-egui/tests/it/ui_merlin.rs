@@ -576,3 +576,84 @@ fn locked_pins_refuse_edits_outside_them() {
     wait_idle(&mut h);
     assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Turn { decision: Decision::Pending, .. })));
 }
+
+/// Plan mode: Merlin only looks and answers with beats on the storyboard; Build it turns them into
+/// notes and builds them in one turn; a plan can be revised or discarded.
+#[test]
+fn plan_mode_proposes_beats_and_builds_them() {
+    use effectcraft_ui_egui::panels::merlin::{Mode, PlanState};
+    use merlin_agent::notes::{Author, NoteStatus};
+    let mut h = harness();
+    board(&mut h);
+    click(&mut h, "merlin.mode.plan");
+    assert_eq!(h.state().ui.merlin.mode, Mode::Plan);
+    let before = h.state().session.project.clone();
+    h.state_mut().ui.merlin.input = "Big Launch".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(std::sync::Arc::ptr_eq(&h.state().session.project, &before), "plan mode builds nothing");
+    let items = h.state().ui.merlin.items.clone();
+    let plan = items.iter().position(|i| matches!(i, ChatItem::Plan { .. })).expect("a plan card");
+    let ChatItem::Plan { beats, state, title } = &items[plan] else { unreachable!() };
+    assert_eq!((title.as_str(), *state, beats.len()), ("Big Launch", PlanState::Proposed, 3));
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| n.author == Author::Merlin && n.status == NoteStatus::Proposed && n.end.is_some()), "{notes:#?}");
+    assert!(h.state().ui.merlin.strip_open, "the beats show on the storyboard");
+    assert!(h.state().auto.find("merlin.notes.apply").is_none(), "beats aren't notes to apply yet");
+
+    // Asking again revises: the new plan replaces the old beats.
+    h.state_mut().ui.merlin.input = "Make it faster".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    assert!(matches!(&items[plan], ChatItem::Plan { state: PlanState::Revised, .. }));
+    let latest = items.iter().rposition(|i| matches!(i, ChatItem::Plan { .. })).unwrap();
+    assert_eq!(h.state().ui.merlin.notes.len(), 3, "old beats replaced");
+
+    // Build it: Act mode, one turn that resolves every beat.
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.plan.{latest}.build"));
+    assert_eq!(h.state().ui.merlin.mode, Mode::Act);
+    wait_idle(&mut h);
+    let notes = h.state().ui.merlin.notes.clone();
+    assert!(notes.iter().all(|n| matches!(n.status, NoteStatus::Addressed { .. })), "{notes:#?}");
+    assert!(matches!(&h.state().ui.merlin.items[latest], ChatItem::Plan { state: PlanState::Built, .. }));
+}
+
+#[test]
+fn a_discarded_plan_takes_its_beats_off_the_storyboard() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.mode = effectcraft_ui_egui::panels::merlin::Mode::Plan;
+    h.state_mut().ui.merlin.input = "Intro".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let plan = h.state().ui.merlin.items.iter().position(|i| matches!(i, ChatItem::Plan { .. })).unwrap();
+    h.run_steps(2);
+    click(&mut h, &format!("merlin.plan.{plan}.discard"));
+    assert!(h.state().ui.merlin.notes.is_empty());
+}
+
+/// Writes `target/test-out/merlin-plan.png` (a plan card, beats on the storyboard, a built note):
+/// `cargo test -p effectcraft-ui-egui --test it merlin_plan_snapshot -- --ignored`.
+#[test]
+#[ignore]
+fn merlin_plan_snapshot() {
+    let mut h = harness();
+    board(&mut h);
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-plan.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    click(&mut h, "merlin.mode.plan");
+    h.state_mut().ui.merlin.input = "A launch title".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(h.state_mut(), &ctx, &serde_json::json!({"pin": {"range": [0.6, 1.2]}})).unwrap();
+    h.state_mut().ui.merlin.input = "Make beat 2 snappier".into();
+    h.run_steps(6);
+    h.render().expect("render").save(out).unwrap();
+}

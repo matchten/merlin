@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::markdown::{self, Block, Span};
 use super::native::{self, Runtime};
-use super::{AttachState, ChatItem, Decision, ToolState};
+use super::{AttachState, ChatItem, Decision, Mode, PlanState, ToolState};
 use crate::EffectcraftApp;
 use crate::i18n::{tr, tr_args};
 use crate::icons::{self, Icon};
@@ -48,6 +48,9 @@ enum Act {
     Suggest(usize),
     PinFrame,
     PinLayers,
+    BuildPlan(usize),
+    DiscardPlan(usize),
+    SetMode(Mode),
 }
 
 /// The panel's colours, derived from the theme so light and dark both work.
@@ -127,6 +130,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
             Act::SaveKey | Act::RemoveKey => native::save_or_remove_key(app, matches!(a, Act::SaveKey)),
+            Act::BuildPlan(i) => native::build_plan(app, &ctx, i),
+            Act::DiscardPlan(i) => native::discard_plan(app, i),
+            Act::SetMode(m) => app.ui.merlin.mode = m,
             Act::PinFrame => super::mentions::pin_current_frame(app),
             Act::PinLayers => super::mentions::pin_selected_layers(app),
         }
@@ -402,6 +408,22 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                         ui.add_space(6.0);
                     }
                     ChatItem::Notice { text, error } => notice_ui(ui, text, *error, look),
+                    ChatItem::Plan { title, beats, state } => {
+                        let rows: Vec<(String, String)> = beats
+                            .iter()
+                            .filter_map(|id| panel.notes.iter().find(|n| n.id == *id))
+                            .map(|n| {
+                                let comp = session.project.comp(effectcraft_engine::project::ItemId(n.comp));
+                                let at = |t| comp.map(|c| crate::panels::timecode(session, c, t)).unwrap_or_default();
+                                let when = match n.end {
+                                    Some(e) => format!("{} – {}", at(n.start), at(e)),
+                                    None => at(n.start),
+                                };
+                                (when, n.text.clone())
+                            })
+                            .collect();
+                        plan_card(ui, auto, acts, look, i, title, &rows, *state, busy);
+                    }
                 }
             });
             after_user = is_user;
@@ -579,6 +601,7 @@ fn tool_title(name: &str, state: ToolState, input: &str, frames: usize) -> (Icon
         "add_effect" => (Icon::Fx, pick(tr("Adding an effect…"), tr_args("Added {}", &[&arg("effect").unwrap_or_else(|| tr("an effect").into())]))),
         "list_effects" | "list_fonts" | "list_commands" | "describe_command" => (Icon::Search, pick(tr("Looking things up…"), tr("Looked things up").into())),
         "import_file" => (Icon::Image, pick(tr("Importing a file…"), tr("Imported a file").into())),
+        "propose_plan" => (Icon::Flowchart, pick(tr("Writing a plan…"), tr("Proposed a plan").into())),
         "resolve_note" => {
             let id = serde_json::from_str::<Value>(input).ok().and_then(|v| v.get("id").and_then(Value::as_u64)).unwrap_or(0);
             let declined = input.contains("wont_fix");
@@ -811,6 +834,83 @@ fn drop_hint(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect, look: &Look) {
     app.auto.add("merlin.dropTarget", rect, label);
 }
 
+/// A proposed plan: its beats (time, what happens) and Build / Discard.
+#[allow(clippy::too_many_arguments)]
+fn plan_card(
+    ui: &mut egui::Ui,
+    auto: &mut crate::automation::Registry,
+    acts: &mut Vec<Act>,
+    look: &Look,
+    i: usize,
+    title: &str,
+    rows: &[(String, String)],
+    state: PlanState,
+    busy: bool,
+) {
+    let t = look.t;
+    let live = state == PlanState::Proposed;
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .fill(look.card)
+        .stroke(Stroke::new(1.0, if live { look.magic.gamma_multiply(0.7) } else { look.border }))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                icons::paint(ui.painter(), r, Icon::Flowchart, look.magic);
+                ui.label(RichText::new(tr("Plan")).font(Tokens::semibold(11.0)).color(look.magic));
+                ui.label(RichText::new(title).font(Tokens::semibold(13.0)).color(t.text));
+            });
+            ui.add_space(4.0);
+            if rows.is_empty() {
+                ui.label(RichText::new(tr("Its beats were removed from the storyboard.")).font(Tokens::ui(11.5)).color(t.text_faint));
+            }
+            for (k, (when, text)) in rows.iter().enumerate() {
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(format!("{}", k + 1)).font(Tokens::semibold(11.5)).color(look.magic));
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(when).font(Tokens::medium(11.0)).color(t.text_dim));
+                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(12.5)).color(t.text)).wrap());
+                    });
+                });
+            }
+            ui.add_space(6.0);
+            match state {
+                PlanState::Proposed => {
+                    ui.label(RichText::new(tr("Edit the beats on the storyboard, ask for changes, or build it.")).font(Tokens::ui(11.0)).color(t.text_faint));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let b = pill(ui, tr("Build it"), true, !busy, look, &format!("plan-build-{i}"));
+                        auto.add(&format!("merlin.plan.{i}.build"), b.rect, "Build it");
+                        if b.clicked() {
+                            acts.push(Act::BuildPlan(i));
+                        }
+                        let d = pill(ui, tr("Discard"), false, !busy, look, &format!("plan-discard-{i}"));
+                        auto.add(&format!("merlin.plan.{i}.discard"), d.rect, "Discard plan");
+                        if d.clicked() {
+                            acts.push(Act::DiscardPlan(i));
+                        }
+                    });
+                }
+                PlanState::Building => {
+                    ui.label(RichText::new(tr("Building…")).font(Tokens::medium(11.5)).color(look.magic));
+                }
+                PlanState::Built => {
+                    ui.label(RichText::new(tr("✓ Built")).font(Tokens::medium(11.5)).color(t.text_dim));
+                }
+                PlanState::Discarded => {
+                    ui.label(RichText::new(tr("Discarded")).font(Tokens::medium(11.5)).color(t.text_faint));
+                }
+                PlanState::Revised => {
+                    ui.label(RichText::new(tr("Replaced by a newer plan")).font(Tokens::medium(11.5)).color(t.text_faint));
+                }
+            }
+        });
+    ui.add_space(4.0);
+}
+
 // ------------------------------------------------------------------ composer
 
 fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now: f64, acts: &mut Vec<Act>) {
@@ -868,14 +968,36 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     if a.on_hover_text(tr("Attach images, Photoshop, SVG, PDF or Illustrator files (or drag them onto this panel)")).clicked() {
         acts.push(Act::Attach);
     }
-    if bar.width() > 230.0 {
-        ui.painter().text(
-            pos2(attach.max.x + 6.0, bar.center().y),
-            Align2::LEFT_CENTER,
-            tr("Enter to send · Shift+Enter for a new line"),
-            Tokens::ui(10.5),
-            t.text_faint,
-        );
+    // Act | Plan.
+    let mode = app.ui.merlin.mode;
+    let seg_w = 40.0;
+    let seg = Rect::from_min_size(pos2(attach.max.x + 6.0, bar.center().y - 11.0), vec2(seg_w * 2.0, 22.0));
+    ui.painter().rect_filled(seg, 11.0, t.app_bg);
+    for (k, (m, label, id, tip)) in [
+        (Mode::Act, tr("Act"), "merlin.mode.act", tr("Act: Merlin builds right away")),
+        (Mode::Plan, tr("Plan"), "merlin.mode.plan", tr("Plan: Merlin only looks, then proposes timed beats for you to edit and build")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = Rect::from_min_size(pos2(seg.min.x + k as f32 * seg_w, seg.min.y), vec2(seg_w, 22.0));
+        let resp = ui.interact(r, egui::Id::unique(("merlin-mode", k)), if busy { Sense::hover() } else { Sense::click() });
+        let on = mode == m;
+        if on {
+            ui.painter().rect_filled(r.shrink(2.0), 9.0, if m == Mode::Plan { look.magic.gamma_multiply(0.3) } else { t.hover });
+        }
+        let col = if on { if m == Mode::Plan { look.magic } else { t.text } } else { t.text_faint };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, Tokens::medium(11.0), col);
+        app.auto.add(id, r, tip);
+        if resp.on_hover_text(tip).clicked() {
+            acts.push(Act::SetMode(m));
+        }
+    }
+    // A hint, when it fits before the send button.
+    let hint = if mode == Mode::Plan { tr("Merlin plans; nothing is built yet") } else { tr("Enter to send · Shift+Enter for a new line") };
+    let g = ui.painter().layout_no_wrap(hint.to_string(), Tokens::ui(10.5), t.text_faint);
+    if seg.max.x + 8.0 + g.size().x < bar.max.x - 34.0 {
+        ui.painter().galley(pos2(seg.max.x + 8.0, bar.center().y - g.size().y / 2.0), g, t.text_faint);
     }
     let send = Rect::from_center_size(pos2(bar.max.x - 14.0, bar.center().y), vec2(26.0, 26.0));
     let enabled = busy || native::can_send(app);

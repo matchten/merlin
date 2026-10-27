@@ -19,7 +19,7 @@ use merlin_agent::notes::{self as note_model, Note, NoteBrief, NoteStatus};
 use merlin_agent::{AgentConfig, ProviderKind, RemoteHost, TurnContext, providers, run_turn_with, transport};
 use serde_json::{Value, json};
 
-use super::{AttachState, Attached, ChatItem, Decision, MerlinSettings, ToolState};
+use super::{AttachState, Attached, ChatItem, Decision, MerlinSettings, Mode, PlanState, ToolState};
 use crate::EffectcraftApp;
 use crate::control::{self, ControlRequest, Outcome};
 use crate::dock::PanelKind;
@@ -195,7 +195,10 @@ pub(super) fn ready_notes(app: &EffectcraftApp) -> usize {
 }
 
 fn is_ready(app: &EffectcraftApp, n: &Note) -> bool {
-    n.status == NoteStatus::Open && !n.text.trim().is_empty() && app.session.project.comp(effectcraft_engine::project::ItemId(n.comp)).is_some()
+    app.ui.merlin.mode == Mode::Act
+        && n.status == NoteStatus::Open
+        && !n.text.trim().is_empty()
+        && app.session.project.comp(effectcraft_engine::project::ItemId(n.comp)).is_some()
 }
 
 /// Every note on an existing comp, spelled out for the agent; the ready ones are sent.
@@ -218,6 +221,91 @@ fn note_briefs(app: &EffectcraftApp) -> Vec<NoteBrief> {
             })
         })
         .collect()
+}
+
+/// The active comp's proposed beats as lines, for a plan revision.
+fn current_plan(app: &EffectcraftApp) -> Option<String> {
+    let c = app.session.active_comp_id()?.0;
+    let mut beats: Vec<&Note> = app.ui.merlin.notes.iter().filter(|n| n.comp == c && n.status == NoteStatus::Proposed).collect();
+    beats.sort_by_key(|n| n.start);
+    let lines: Vec<String> =
+        beats.iter().map(|n| format!("- {} to {}: {}", agent_time(app, c, n.start), agent_time(app, c, n.end.unwrap_or(n.start)), n.text.trim())).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// A plan arrived: its beats replace the comp's earlier proposed beats on the storyboard, and a
+/// plan card joins the chat.
+fn take_plan(app: &mut EffectcraftApp, title: String, beats: Vec<merlin_agent::Beat>) {
+    let Some(cid) = app.session.active_comp_id() else { return };
+    let Some(comp) = app.session.active_comp() else { return };
+    let (rate, dur) = (comp.frame_rate, comp.duration);
+    let snap = |s: f64| rate.tick_of(rate.frame_at(Tick::from_seconds_f64(s).min(dur)).max(0));
+    let layers: Vec<(String, u64)> = comp.layers.iter().map(|l| (l.name.to_lowercase(), l.id.0)).collect();
+    let panel = &mut app.ui.merlin;
+    let old: Vec<u64> = panel.notes.iter().filter(|n| n.comp == cid.0 && n.status == NoteStatus::Proposed).map(|n| n.id).collect();
+    panel.notes.retain(|n| !old.contains(&n.id));
+    for it in &mut panel.items {
+        if let ChatItem::Plan { state: s @ PlanState::Proposed, .. } = it {
+            *s = PlanState::Revised;
+        }
+    }
+    let mut next = panel.notes.iter().map(|n| n.id).max().unwrap_or(0);
+    let mut ids = vec![];
+    for b in beats {
+        next = next.saturating_add(1);
+        let (start, end) = (snap(b.start), snap(b.end));
+        let ls = b.layers.iter().filter_map(|name| layers.iter().find(|(l, _)| *l == name.to_lowercase()).map(|(_, id)| *id)).collect();
+        panel.notes.push(Note {
+            id: next,
+            comp: cid.0,
+            start,
+            end: (end > start).then_some(end),
+            layers: ls,
+            text: b.text,
+            author: merlin_agent::notes::Author::Merlin,
+            status: NoteStatus::Proposed,
+            ..Note::default()
+        });
+        ids.push(next);
+    }
+    panel.strip_open = true;
+    panel.items.push(ChatItem::Plan { title, beats: ids, state: PlanState::Proposed });
+}
+
+/// Build the plan card at `item`: its beats become notes to apply, in Act mode.
+pub(super) fn build_plan(app: &mut EffectcraftApp, ctx: &egui::Context, item: usize) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let panel = &mut app.ui.merlin;
+    let Some(ChatItem::Plan { title, beats, state }) = panel.items.get_mut(item) else { return };
+    if *state != PlanState::Proposed {
+        return;
+    }
+    *state = PlanState::Building;
+    let (title, beats) = (title.clone(), beats.clone());
+    for n in panel.notes.iter_mut().filter(|n| beats.contains(&n.id) && n.status == NoteStatus::Proposed) {
+        n.status = NoteStatus::Open;
+    }
+    panel.mode = Mode::Act;
+    if panel.input.trim().is_empty() {
+        panel.input = tr_args("Build the plan “{}”: work through its beats in order and resolve each one when it's done.", &[&title]);
+    }
+    start_turn(app, ctx);
+}
+
+/// Drop the plan card at `item` and its beats.
+pub(super) fn discard_plan(app: &mut EffectcraftApp, item: usize) {
+    let panel = &mut app.ui.merlin;
+    let Some(ChatItem::Plan { beats, state, .. }) = panel.items.get_mut(item) else { return };
+    if *state != PlanState::Proposed {
+        return;
+    }
+    *state = PlanState::Discarded;
+    let beats = beats.clone();
+    for id in beats {
+        remove_note(app, id);
+    }
 }
 
 /// A new note at `start` (a range to `end`) on the active comp, about the selected layers; its
@@ -273,7 +361,8 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let note_ids: Vec<u64> = briefs.iter().filter(|b| b.send).map(|b| b.note.id).collect();
     let time = app.session.active_comp_id().map(|c| agent_time(app, c.0, app.session.time()));
     let (pins, scope) = super::mentions::briefs(app);
-    let turn_ctx = TurnContext { time, notes: briefs, pins };
+    let plan_mode = app.ui.merlin.mode == Mode::Plan;
+    let turn_ctx = TurnContext { time, notes: briefs, pins, plan_mode, current_plan: if plan_mode { current_plan(app) } else { None } };
     let panel = &mut app.ui.merlin;
     let pin_labels: Vec<String> = std::mem::take(&mut panel.pins).into_iter().map(|p| if p.locked { format!("🔒 {}", p.label) } else { p.label }).collect();
     panel.rt.mention_off = None;
@@ -648,6 +737,7 @@ fn apply_event(app: &mut EffectcraftApp, e: AgentEvent) {
             }
         }
         AgentEvent::Usage(_) => {}
+        AgentEvent::PlanProposed { .. } => {}
         AgentEvent::NoteFrame { id, png } => {
             let key = format!("note-before:{id}");
             panel.rt.textures.remove(&key);
@@ -710,6 +800,11 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
     // Notes the turn never reported on can be applied again.
     for n in panel.notes.iter_mut().filter(|n| n.status == NoteStatus::Sent) {
         n.status = NoteStatus::Open;
+    }
+    for it in &mut panel.items {
+        if let ChatItem::Plan { state: s @ PlanState::Building, .. } = it {
+            *s = PlanState::Built;
+        }
     }
 }
 
@@ -809,7 +904,10 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     }
     app.ui.merlin.rt.worker = Some(w);
     for e in events {
-        apply_event(app, e);
+        match e {
+            AgentEvent::PlanProposed { title, beats } => take_plan(app, title, beats),
+            e => apply_event(app, e),
+        }
     }
     let abandon = app.ui.merlin.rt.worker.as_ref().and_then(|w| w.stopping_since).is_some_and(|t| now - t > STOP_GRACE_SECS);
     if done.is_some() || abandon {
