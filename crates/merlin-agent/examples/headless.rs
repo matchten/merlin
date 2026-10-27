@@ -89,7 +89,7 @@ fn run() -> Result<(), String> {
         };
         notes.push(NoteBrief { note, at: label(a), until: b.map(label), layers: vec![], comp_size: size, send: true });
     }
-    let ctx = TurnContext { time: Some(label(0.0)), notes };
+    let ctx = TurnContext { time: Some(label(0.0)), notes, ..TurnContext::default() };
 
     let mut conversation = vec![];
     let mut frame_n = 0;

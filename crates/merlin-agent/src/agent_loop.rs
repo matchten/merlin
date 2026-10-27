@@ -62,6 +62,17 @@ pub struct TurnContext {
     pub time: Option<String>,
     /// The notes this turn applies (`send`) and the strip's others (so `resolve_note` knows them).
     pub notes: Vec<NoteBrief>,
+    /// What the user pinned with `@`: the lines of a `<pins>` block, and the frames to show.
+    pub pins: Vec<PinBrief>,
+}
+
+/// One thing the user pinned to the message (a layer, a frame, a range, a note).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PinBrief {
+    /// Its line in the `<pins>` block.
+    pub line: String,
+    /// Frames to show the agent: (comp id, comp time, label).
+    pub frames: Vec<(u64, effectcraft_time::Tick, String)>,
 }
 
 /// How a turn ended.
@@ -115,6 +126,7 @@ pub fn run_turn_with(
     cancel: &AtomicBool,
 ) -> TurnOutcome {
     let mut parts = user;
+    parts.extend(pin_parts(host, ctx, cfg.frame_max_side()));
     parts.extend(note_parts(host, ctx, cfg.frame_max_side(), on_event));
     parts.push(Part::Text { text: context::snapshot_at(host, ctx.time.as_deref()) });
     conversation.push(Message::user(parts));
@@ -183,6 +195,27 @@ pub fn run_turn_with(
         TurnEnd::MaxSteps
     };
     TurnOutcome { end, usage, tool_calls }
+}
+
+/// The pinned frames, then the `<pins>` block.
+fn pin_parts(host: &mut dyn Host, ctx: &TurnContext, max_side: u32) -> Vec<Part> {
+    if ctx.pins.is_empty() {
+        return vec![];
+    }
+    let mut parts = vec![];
+    for (comp, t, label) in ctx.pins.iter().flat_map(|p| &p.frames) {
+        match host.render(Some(&json!(comp)), Some(t.seconds()), max_side) {
+            Ok(f) => parts.push(Part::Image { image: Image::png(&f.png), label: Some(label.clone()) }),
+            Err(e) => parts.push(Part::Text { text: format!("({label} could not be rendered: {e})") }),
+        }
+    }
+    let mut block = String::from("<pins>\nThe user pinned these to the message with @ (frames attached above):\n");
+    for p in &ctx.pins {
+        block.push_str(&format!("- {}\n", p.line));
+    }
+    block.push_str("</pins>");
+    parts.push(Part::Text { text: block });
+    parts
 }
 
 /// Each note being sent as its frame (both ends of a range, region outlined), then the `<notes>`

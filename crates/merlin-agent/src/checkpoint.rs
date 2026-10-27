@@ -68,4 +68,17 @@ impl Checkpoint {
         }
         s.execute("edit.undo", serde_json::json!({})).is_ok() && !self.changed(s)
     }
+
+    /// Throw away everything since the checkpoint, leaving no undo or redo step behind (a tool call
+    /// the edit guard refused). Returns whether the project is back where it was.
+    pub fn discard(&self, s: &mut Session) -> bool {
+        if !self.changed(s) {
+            return true;
+        }
+        if !self.collapse(s, "Merlin: refused edit") || !self.is_latest(s) || !s.undo() {
+            return false;
+        }
+        s.history.redo.pop();
+        !self.changed(s)
+    }
 }

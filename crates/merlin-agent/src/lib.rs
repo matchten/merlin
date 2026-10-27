@@ -13,6 +13,7 @@
 //! * [`checkpoint`]: folds a turn's edits into one undo step and reverts it.
 //! * [`attachment`]: files the user attaches (images, PSD, SVG, PDF, AI…) decoded into labelled images.
 //! * [`notes`]: requests pinned to a frame or range of a comp, applied as one turn.
+//! * [`guard`]: keeps edits inside the layers and time range the user pinned.
 //! * [`keys`]: API keys from environment variables or the OS keychain, never from preferences.
 //!
 //! Layering: depends on `effectcraft-engine`, `effectcraft-automation` (PNG encoding) and
@@ -26,6 +27,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod context;
 pub mod conversation;
+pub mod guard;
 pub mod host;
 pub mod keys;
 pub mod notes;
@@ -35,7 +37,7 @@ pub mod sse;
 pub mod tools;
 pub mod transport;
 
-pub use agent_loop::{AgentEvent, TurnContext, TurnOutcome, run_turn, run_turn_with};
+pub use agent_loop::{AgentEvent, PinBrief, TurnContext, TurnOutcome, run_turn, run_turn_with};
 pub use config::{AgentConfig, ProviderKind};
 pub use conversation::{Message, Part, ResultPart, Role};
 pub use host::{HeadlessHost, Host, RemoteHost};

@@ -440,6 +440,7 @@ fn notes_travel_as_frames_and_come_back_resolved() {
     let ctx = TurnContext {
         time: Some(time_label("0:00:00:00", 0, 0.0)),
         notes: vec![brief(1, 0.5, None, true), brief(2, 1.0, Some(2.0), true), brief(9, 3.0, None, false)],
+        ..TurnContext::default()
     };
     let mut conv = vec![];
     let mut events = vec![];
@@ -506,4 +507,43 @@ impl LlmProvider for Fixed {
             usage: Default::default(),
         })
     }
+}
+
+#[test]
+fn discard_leaves_no_undo_or_redo_step() {
+    let mut h = host();
+    h.command("script.run", json!({"code": BUILD})).unwrap();
+    let undo = h.session.history.undo.len();
+    let before = h.session.project.clone();
+    let cp = Checkpoint::take(&h.session);
+    h.command("script.run", json!({"code": "app.project.activeItem.layer('Title').name = 'Renamed'; app.project.activeItem.layers.addNull();"})).unwrap();
+    h.command("layer.select", json!({"layers": ["#1"]})).unwrap();
+    assert!(cp.changed(&h.session));
+    assert!(cp.discard(&mut h.session));
+    assert!(Arc::ptr_eq(&h.session.project, &before));
+    assert_eq!((h.session.history.undo.len(), h.session.history.redo.len()), (undo, 0));
+    assert!(cp.discard(&mut h.session), "nothing to discard is fine");
+}
+
+#[test]
+fn pins_travel_as_frames_and_a_block() {
+    use merlin_agent::{PinBrief, TurnContext, run_turn_with};
+    let p = merlin_agent::providers::demo::Demo { chunk_delay: std::time::Duration::ZERO };
+    let mut h = host();
+    h.command("script.run", json!({"code": BUILD})).unwrap();
+    let comp = h.command("comp.info", json!({})).unwrap()["id"].as_u64().unwrap();
+    let t = effectcraft_time::Tick::from_seconds_f64(0.5);
+    let ctx = TurnContext {
+        pins: vec![
+            PinBrief { line: "layer \"Title\" (id 2), locked".into(), frames: vec![] },
+            PinBrief { line: "frame 0:00:00:15".into(), frames: vec![(comp, t, "Pinned frame 0:00:00:15".into())] },
+        ],
+        ..TurnContext::default()
+    };
+    let mut conv = vec![];
+    let cfg = AgentConfig { provider: ProviderKind::Demo, frame_max_side: 64, ..Default::default() };
+    run_turn_with(&p, &mut h, &cfg, &mut conv, vec![Part::Text { text: "make @Title pop".into() }], &ctx, &mut |_| {}, &AtomicBool::new(false));
+    let first = &conv[0].parts;
+    assert!(matches!(&first[1], Part::Image { label: Some(l), .. } if l == "Pinned frame 0:00:00:15"), "{first:?}");
+    assert!(matches!(&first[2], Part::Text { text } if text.starts_with("<pins>") && text.contains("- layer \"Title\" (id 2), locked\n- frame 0:00:00:15\n")));
 }
