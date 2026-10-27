@@ -1,6 +1,6 @@
 [package]
 name = "merlin-agent"
-description = "Merlin, the in-app AI agent for EffectCraft: provider adapters (Anthropic, OpenAI-compatible), the tool-use loop over engine commands, turn checkpoints and API key storage"
+description = "Merlin, the in-app AI agent: provider adapters (Anthropic, OpenAI-compatible), the tool-use loop over engine commands, turn checkpoints and API key storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

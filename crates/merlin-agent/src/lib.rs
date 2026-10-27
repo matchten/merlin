@@ -1,7 +1,7 @@
 //! # merlin-agent (L5)
 //!
-//! Merlin, the in-app AI agent for EffectCraft: a chat model that animates by writing After Effects-style JavaScript and
-//! calling EffectCraft's engine commands, with every edit live and undoable.
+//! Merlin, the in-app AI agent: a chat model that animates by writing After Effects-style JavaScript and
+//! calling the engine's commands, with every edit live and undoable.
 //!
 //! * [`provider`]: the [`LlmProvider`] interface over a normalized [`conversation`], with two
 //!   adapters: [`providers::anthropic`] (Messages API) and [`providers::openai_compat`] (Chat
@@ -47,7 +47,7 @@ pub use effectcraft_automation::base64;
 pub use host::{HeadlessHost, Host, RemoteHost};
 pub use provider::LlmProvider;
 
-/// The system prompt: how EffectCraft works and how to animate it (stable, so providers cache it).
+/// The system prompt: how the app works and how to animate it (stable, so providers cache it).
 pub const SYSTEM_PROMPT: &str = include_str!("../prompts/system.md");
 
 #[derive(Debug, thiserror::Error)]
