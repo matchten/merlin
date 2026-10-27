@@ -64,6 +64,8 @@ struct Worker {
     status: Option<String>,
     /// The limits the message's locked pins set (each edit outside them is refused).
     scope: Option<Scope>,
+    /// The model the turn runs on (for its cost).
+    model: String,
 }
 
 /// What the panel keeps outside its serialized state.
@@ -114,6 +116,13 @@ pub(crate) struct Runtime {
     pub(super) mention_off: Option<usize>,
     /// The pin chips' height last frame (they wrap in a narrow panel).
     pub(super) pins_h: f32,
+    /// The project file the chat belongs to (`Some(None)`: an unsaved project), once known.
+    chat_for: Option<Option<String>>,
+    /// The project state seen last frame (to tell Save As from opening another project).
+    seen_project: usize,
+    /// What was last saved, and when the panel last checked.
+    saved_fingerprint: u64,
+    last_save_check: f64,
 }
 
 impl Clone for Runtime {
@@ -357,6 +366,8 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
     }
     let checkpoint = Checkpoint::take(&app.session);
+    let restore_id = checkpoint.state_id();
+    let model = cfg.model().to_string();
     let briefs = note_briefs(app);
     let note_ids: Vec<u64> = briefs.iter().filter(|b| b.send).map(|b| b.note.id).collect();
     let time = app.session.active_comp_id().map(|c| agent_time(app, c.0, app.session.time()));
@@ -393,7 +404,13 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     } else {
         sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
     };
-    panel.items.push(ChatItem::User { text, attachments: sent.into_iter().map(|a| a.path).collect(), notes: note_ids, pins: pin_labels });
+    panel.items.push(ChatItem::User {
+        text,
+        attachments: sent.into_iter().map(|a| a.path).collect(),
+        notes: note_ids,
+        pins: pin_labels,
+        checkpoint: Some(restore_id),
+    });
     let rt = &mut panel.rt;
     rt.next_turn = rt.next_turn.saturating_add(1);
     let turn = rt.next_turn;
@@ -443,7 +460,7 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     });
     match spawned {
         Ok(_) => {
-            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None, scope });
+            rt.worker = Some(Worker { turn, request, checkpoint, cancel, rx: ev_rx, stopping_since: None, tool_calls: 0, status: None, scope, model });
             panel.busy = true;
         }
         Err(e) => notice(app, tr_args("Merlin couldn't start: {}", &[&e]), true),
@@ -789,6 +806,7 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
         tool_calls: outcome.as_ref().map_or(w.tool_calls, |o| o.tool_calls),
         input_tokens: usage.total_input(),
         output_tokens: usage.output_tokens,
+        cost: merlin_agent::pricing::cost(&w.model, &usage),
     });
     if changed {
         panel.rt.checkpoints.push((w.turn, w.checkpoint));
@@ -806,6 +824,34 @@ fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>
             *s = PlanState::Built;
         }
     }
+}
+
+/// Restore to here: put the project back as it was before the message at `item` (a jump in the
+/// branching history, so later work stays reachable in Window ▸ History).
+pub(super) fn restore(app: &mut EffectcraftApp, ctx: &egui::Context, item: usize) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let Some(ChatItem::User { checkpoint: Some(id), .. }) = app.ui.merlin.items.get(item).cloned() else { return };
+    match crate::menus::invoke(app, ctx, "edit.history.goto", json!({"id": id})) {
+        Ok(_) => notice(app, tr("Restored the project to before this message. Later work is still in Window ▸ History."), false),
+        Err(_) => notice(app, tr("That point is no longer in the undo history (it was trimmed, or the project was reopened)."), true),
+    }
+}
+
+/// The chat's approximate cost so far, when every priced turn's model is known.
+pub(super) fn chat_cost(panel: &super::MerlinPanel) -> (u64, u64, Option<f64>) {
+    let mut total = (0u64, 0u64, None::<f64>);
+    for it in &panel.items {
+        if let ChatItem::Turn { input_tokens, output_tokens, cost, .. } = it {
+            total.0 = total.0.saturating_add(*input_tokens);
+            total.1 = total.1.saturating_add(*output_tokens);
+            if let Some(c) = cost {
+                total.2 = Some(total.2.unwrap_or(0.0) + c);
+            }
+        }
+    }
+    total
 }
 
 pub(super) fn decide(app: &mut EffectcraftApp, ctx: &egui::Context, turn: u64, keep: bool) {
@@ -856,6 +902,7 @@ fn enforce(app: &mut EffectcraftApp, scope: &Scope, cp: &Checkpoint, reply: Valu
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
     take_attachments(app, ctx);
+    sync_chat(app, now);
     if let Some((tx, rx)) = app.ui.merlin.rt.requests.take() {
         let mut reqs = std::mem::take(&mut app.ui.merlin.rt.deferred);
         while let Ok(r) = rx.try_recv() {
@@ -918,6 +965,187 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
         }
     } else if app.ui.merlin.rt.worker.as_ref().is_some_and(|w| w.stopping_since.is_some()) {
         ctx.request_repaint_after(Duration::from_millis(250));
+    }
+}
+
+// ------------------------------------------------------------------ saving with the project
+
+/// Saved next to the project as `<name>.merlin.json`: the chat as shown, the notes, the model
+/// conversation (with its images) and the notes' before / after frames.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SavedChat {
+    version: u32,
+    items: Vec<ChatItem>,
+    notes: Vec<Note>,
+    conversation: Vec<Message>,
+    /// PNG (base64) by frame key (`note-before:3`, `note-after:3`).
+    note_frames: std::collections::BTreeMap<String, String>,
+}
+
+fn chat_path(project: &str) -> std::path::PathBuf {
+    std::path::Path::new(project).with_extension("merlin.json")
+}
+
+fn fingerprint(panel: &super::MerlinPanel) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&(&panel.items, &panel.notes)).unwrap_or_default().hash(&mut h);
+    panel.rt.conversation.len().hash(&mut h);
+    h.finish()
+}
+
+/// Write the chat for `project` (in the background). An empty chat removes a saved one.
+fn save_chat(app: &mut EffectcraftApp, project: &str) {
+    let panel = &app.ui.merlin;
+    let path = chat_path(project);
+    if panel.items.is_empty() && panel.notes.is_empty() {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        return;
+    }
+    let note_frames = panel
+        .rt
+        .frames
+        .iter()
+        .filter(|(k, _)| k.starts_with("note-"))
+        .filter_map(|(k, v)| v.first().map(|png| (k.clone(), merlin_agent::base64::encode(png))))
+        .collect();
+    let saved = SavedChat { version: 1, items: panel.items.clone(), notes: panel.notes.clone(), conversation: panel.rt.conversation.clone(), note_frames };
+    let text = match serde_json::to_string(&saved) {
+        Ok(t) => t,
+        Err(e) => {
+            app.ui.status = format!("Merlin chat: {e}");
+            return;
+        }
+    };
+    let _ = std::thread::Builder::new().name("merlin-save".into()).spawn(move || {
+        let tmp = path.with_extension("merlin.json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    });
+}
+
+/// Start the panel over for another project (its notes, chat and conversation).
+fn reset_chat(app: &mut EffectcraftApp) {
+    let p = &mut app.ui.merlin;
+    p.items.clear();
+    p.notes.clear();
+    p.pins.clear();
+    p.editing_note = None;
+    p.marking_note = None;
+    p.rt.conversation.clear();
+    p.rt.checkpoints.clear();
+    p.rt.appear.clear();
+    p.rt.frames.retain(|k, _| k.starts_with("att:"));
+    p.rt.textures.clear();
+    p.rt.film = None;
+}
+
+/// Load the chat saved for `project`, if any.
+fn load_chat(app: &mut EffectcraftApp, project: &str) {
+    let Ok(text) = std::fs::read_to_string(chat_path(project)) else { return };
+    let Ok(saved) = serde_json::from_str::<SavedChat>(&text) else {
+        app.ui.status = tr("The saved Merlin chat for this project couldn't be read; starting a new one.").to_string();
+        return;
+    };
+    let p = &mut app.ui.merlin;
+    p.items = saved.items;
+    p.notes = saved.notes;
+    // Undo history isn't saved: past turns can't be reverted any more, notes in flight reopen.
+    for it in &mut p.items {
+        match it {
+            ChatItem::Turn { decision: d @ Decision::Pending, .. } => *d = Decision::Kept,
+            ChatItem::Plan { state: s @ PlanState::Building, .. } => *s = PlanState::Built,
+            ChatItem::Tool { state: s @ (ToolState::Pending | ToolState::Running), .. } => *s = ToolState::Failed,
+            _ => {}
+        }
+    }
+    for n in p.notes.iter_mut().filter(|n| n.status == NoteStatus::Sent) {
+        n.status = NoteStatus::Open;
+    }
+    for (k, b64) in saved.note_frames {
+        if let Some(png) = merlin_agent::base64::decode(&b64) {
+            p.rt.frames.insert(k, vec![png]);
+        }
+    }
+    // The chat's thumbnails come back from the conversation: tool calls' frames, attachments.
+    for m in &saved.conversation {
+        for part in &m.parts {
+            match part {
+                Part::ToolResult { call_id, content, .. } => {
+                    let pngs: Vec<Vec<u8>> = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            merlin_agent::ResultPart::Image { image } => merlin_agent::base64::decode(&image.data),
+                            merlin_agent::ResultPart::Text { .. } => None,
+                        })
+                        .collect();
+                    if !pngs.is_empty() {
+                        p.rt.frames.insert(call_id.clone(), pngs);
+                    }
+                }
+                Part::Image { image, label: Some(label) } => {
+                    if let (Some((_, path)), Some(png)) = (label.split_once(" at path "), merlin_agent::base64::decode(&image.data)) {
+                        let path = path.split(';').next().unwrap_or(path);
+                        p.rt.frames.insert(format!("att:{path}"), vec![png]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    p.rt.conversation = saved.conversation;
+    p.rt.saved_fingerprint = fingerprint(p);
+}
+
+/// Keep the chat with its project: load it when another project opens, save it as it changes.
+fn sync_chat(app: &mut EffectcraftApp, now: f64) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    let path = app.session.path.clone().filter(|p| !p.is_empty());
+    let ptr = Arc::as_ptr(&app.session.project) as usize;
+    let prev = app.ui.merlin.rt.chat_for.clone();
+    match prev {
+        None => {
+            if let Some(p) = &path {
+                load_chat(app, p);
+            }
+            app.ui.merlin.rt.chat_for = Some(path);
+        }
+        Some(old) if old != path => {
+            // Save As keeps the document (and the chat); opening or starting another one doesn't.
+            let same_document = app.ui.merlin.rt.seen_project == ptr;
+            if !same_document {
+                if let Some(o) = &old
+                    && fingerprint(&app.ui.merlin) != app.ui.merlin.rt.saved_fingerprint
+                {
+                    save_chat(app, o);
+                }
+                reset_chat(app);
+                if let Some(p) = &path {
+                    load_chat(app, p);
+                }
+            }
+            app.ui.merlin.rt.saved_fingerprint = if same_document { 0 } else { fingerprint(&app.ui.merlin) };
+            app.ui.merlin.rt.chat_for = Some(path);
+        }
+        Some(_) => {}
+    }
+    app.ui.merlin.rt.seen_project = ptr;
+    // Save what changed, at most every two seconds.
+    if let Some(Some(p)) = app.ui.merlin.rt.chat_for.clone()
+        && now - app.ui.merlin.rt.last_save_check >= 2.0
+    {
+        app.ui.merlin.rt.last_save_check = now;
+        let fp = fingerprint(&app.ui.merlin);
+        if fp != app.ui.merlin.rt.saved_fingerprint {
+            app.ui.merlin.rt.saved_fingerprint = fp;
+            save_chat(app, &p);
+        }
     }
 }
 

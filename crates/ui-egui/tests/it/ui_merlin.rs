@@ -657,3 +657,85 @@ fn merlin_plan_snapshot() {
     h.run_steps(6);
     h.render().expect("render").save(out).unwrap();
 }
+
+/// Restore to here puts the project back as it was before a message (a history jump, so the later
+/// work stays reachable).
+#[test]
+fn restore_to_here_returns_to_before_a_message() {
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.merlin.input = "First".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(has_comp(&h, "Board"));
+    let layers = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().map(|c| c.layers.len()).unwrap_or(0);
+    let after_first = layers(&h);
+    h.state_mut().ui.merlin.input = "Second".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(layers(&h) > after_first);
+    let first = h.state().ui.merlin.items.iter().position(|i| matches!(i, ChatItem::User { text, .. } if text == "First")).unwrap();
+    // Scroll the conversation back to the top.
+    let log = rect_of(&h, "merlin.log").center();
+    h.input_mut().events.push(egui::Event::PointerMoved(log));
+    for _ in 0..10 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 400.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    click(&mut h, &format!("merlin.item.{first}.restore"));
+    assert_eq!(layers(&h), 2, "back to the board's two layers");
+    assert!(matches!(h.state().ui.merlin.items.last(), Some(ChatItem::Notice { error: false, .. })));
+    // The later state is still in the history tree.
+    assert!(h.state().session.history_tree().len() >= 3);
+}
+
+/// The chat, notes and conversation are saved next to the project and come back when it is
+/// opened again; another project starts with a fresh chat.
+#[test]
+fn the_chat_is_saved_with_the_project() {
+    let mut h = harness();
+    board(&mut h);
+    let d = temp_dir("persist");
+    let proj = d.join("Board.ecproj");
+    let chat = d.join("Board.merlin.json");
+    let _ = std::fs::remove_file(&chat);
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1.0, "text": "warmer"}})).unwrap();
+    h.state_mut().ui.merlin.input = "Hello".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    assert!(!h.state().ui.merlin.items.is_empty(), "Save As kept the chat");
+    for _ in 0..600 {
+        h.run_steps(1);
+        if chat.exists() && std::fs::read_to_string(&chat).is_ok_and(|t| t.contains("resolve_note")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(&chat).expect("saved next to the project");
+    assert!(text.contains("\"warmer\"") && text.contains("\"conversation\""));
+    let items = h.state().ui.merlin.items.len();
+
+    // Another project: a fresh chat. Opening this one again brings it back.
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().ui.merlin.items.is_empty() && h.state().ui.merlin.notes.is_empty(), "{:#?}", h.state().ui.merlin.items);
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.merlin.items.len(), items);
+    assert_eq!(h.state().ui.merlin.notes.len(), 1);
+    assert!(matches!(h.state().ui.merlin.notes[0].status, merlin_agent::notes::NoteStatus::Addressed { .. }));
+    assert!(h.state().ui.merlin.items.iter().all(|i| !matches!(i, ChatItem::Turn { decision: Decision::Pending, .. })));
+}

@@ -49,6 +49,7 @@ enum Act {
     PinFrame,
     PinLayers,
     BuildPlan(usize),
+    Restore(usize),
     DiscardPlan(usize),
     SetMode(Mode),
 }
@@ -131,6 +132,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             Act::SaveKey | Act::RemoveKey => native::save_or_remove_key(app, matches!(a, Act::SaveKey)),
             Act::BuildPlan(i) => native::build_plan(app, &ctx, i),
+            Act::Restore(i) => native::restore(app, &ctx, i),
             Act::DiscardPlan(i) => native::discard_plan(app, i),
             Act::SetMode(m) => app.ui.merlin.mode = m,
             Act::PinFrame => super::mentions::pin_current_frame(app),
@@ -293,7 +295,15 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if resp.on_hover_text(tr("Change the provider or model")).clicked() {
+        let (tin, tout, cost) = native::chat_cost(&app.ui.merlin);
+        let mut tip = tr("Change the provider or model").to_string();
+        if tin + tout > 0 {
+            tip.push_str(&format!("\n{}", tr_args("This chat: {} in · {} out", &[&tokens(tin), &tokens(tout)])));
+            if let Some(c) = cost {
+                tip.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
+            }
+        }
+        if resp.on_hover_text(tip).clicked() {
             acts.push(Act::ToggleSettings);
         }
     }
@@ -336,9 +346,9 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     });
                 }
                 match item {
-                    ChatItem::User { text, attachments, notes, pins } => {
+                    ChatItem::User { text, attachments, notes, pins, checkpoint } => {
                         ui.add_space(4.0);
-                        egui::Frame::new()
+                        let card = egui::Frame::new()
                             .fill(look.card)
                             .stroke(Stroke::new(1.0, look.border))
                             .corner_radius(CornerRadius::same(10))
@@ -375,6 +385,16 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                                     ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(BODY)).color(t.text)).wrap());
                                 }
                             });
+                        // Restore to here (not while a turn runs).
+                        let r = card.response.rect;
+                        if checkpoint.is_some() && !busy {
+                            let br = Rect::from_min_size(pos2(r.max.x - 26.0, r.min.y + 4.0), vec2(22.0, 22.0));
+                            let resp = icon_btn(ui, br, Icon::StepBack, false, true, look, &format!("restore-{i}"));
+                            auto.add(&format!("merlin.item.{i}.restore"), br, "Restore to here");
+                            if resp.on_hover_text(tr("Restore to here: put the project back as it was before this message")).clicked() {
+                                acts.push(Act::Restore(i));
+                            }
+                        }
                     }
                     ChatItem::Assistant { text } => markdown_ui(ui, text, look),
                     ChatItem::Thinking { text, open } => {
@@ -402,9 +422,9 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     ChatItem::Tool { id, name, input, state, summary, frames, open } => {
                         tool_card(ui, &ctx, &mut panel.rt, auto, acts, look, i, (id, name, input, *state, summary, *frames, *open));
                     }
-                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens } => {
+                    ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost } => {
                         ui.add_space(2.0);
-                        turn_card(ui, auto, acts, look, &latest, (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens));
+                        turn_card(ui, auto, acts, look, &latest, (*id, label, outcome, *decision, *tool_calls, *input_tokens, *output_tokens, *cost));
                         ui.add_space(6.0);
                     }
                     ChatItem::Notice { text, error } => notice_ui(ui, text, *error, look),
@@ -700,10 +720,13 @@ fn turn_card(
     acts: &mut Vec<Act>,
     look: &Look,
     latest: &[u64],
-    (id, label, outcome, decision, tool_calls, input_tokens, output_tokens): (u64, &String, &String, Decision, usize, u64, u64),
+    (id, label, outcome, decision, tool_calls, input_tokens, output_tokens, cost): (u64, &String, &String, Decision, usize, u64, u64, Option<f64>),
 ) {
     let t = look.t;
-    let stats = tr_args("{} tool calls · {} in · {} out", &[&tool_calls, &tokens(input_tokens), &tokens(output_tokens)]);
+    let mut stats = tr_args("{} tool calls · {} in · {} out", &[&tool_calls, &tokens(input_tokens), &tokens(output_tokens)]);
+    if let Some(c) = cost {
+        stats.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
+    }
     if decision != Decision::Pending {
         // Decided: one quiet line.
         let what = match decision {

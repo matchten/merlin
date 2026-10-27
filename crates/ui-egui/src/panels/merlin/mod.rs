@@ -178,6 +178,9 @@ pub enum ChatItem {
         /// What it was pinned to, as shown.
         #[serde(default)]
         pins: Vec<String>,
+        /// The history state before its turn (Restore to here).
+        #[serde(default)]
+        checkpoint: Option<String>,
     },
     Assistant {
         text: String,
@@ -212,6 +215,9 @@ pub enum ChatItem {
         tool_calls: usize,
         input_tokens: u64,
         output_tokens: u64,
+        /// Approximate cost in dollars (models with known prices).
+        #[serde(default)]
+        cost: Option<f64>,
     },
     Notice {
         text: String,
