@@ -1,11 +1,11 @@
 //! The Tools bar: home, the tool slots, tool options, snapping, workspaces and the community
-//! buttons (Discord is always one click away).
+//! buttons (GitHub, website).
 
 use crate::i18n::{tr, tr_args};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::state::Tool;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -17,7 +17,7 @@ use effectcraft_engine::viewer as vw;
 
 /// Draws the Tools bar into `rect`: brand (About), Home, the tool slots with their fly-out
 /// menus and press-and-hold picks, options for the active tool (shape paint, puppet, roto),
-/// Snapping, then Discord, GitHub, website, appearance and workspace controls. Clicks apply
+/// Snapping, then GitHub, website, appearance and workspace controls. Clicks apply
 /// tool, dialog, theme and workspace changes to `app` or run their commands.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
@@ -188,20 +188,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Right side: community buttons, workspaces.
     let mut rx = rect.max.x - 10.0;
-    // The pill fits its label (icon, gap, text) with even padding: it was a fixed 104 px with the
-    // text at its left, which left a wide gap on the right (#581).
-    let label = p.layout_no_wrap(tr("Discord").to_string(), Tokens::semibold(12.0), Color32::WHITE);
-    let discord = Rect::from_min_max(pos2(rx - (10.0 + 14.0 + 6.0 + label.size().x + 12.0), cy - 13.0), pos2(rx, cy + 13.0));
-    let dresp = ui.interact(discord, egui::Id::unique("hdr-discord"), Sense::click());
-    let dc = Color32::from_rgb(0x58, 0x65, 0xf2);
-    p.rect_filled(discord, 13.0, if dresp.hovered() { dc.gamma_multiply(1.2) } else { dc });
-    icons::paint(&p, Rect::from_center_size(pos2(discord.min.x + 17.0, cy), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
-    p.galley(pos2(discord.min.x + 30.0, cy - label.size().y / 2.0), label, Color32::WHITE);
-    app.auto.add("header.discord", discord, "Join the ArtCraft Discord");
-    if dresp.on_hover_text(tr("Join the ArtCraft community on Discord")).clicked() {
-        let _ = app.session.execute("help.discord", json!({}));
-    }
-    rx = discord.min.x - 6.0;
+    // Merlin's fork has no Discord pill here (Help ▸ Discord still links to the community).
     for (id, icon, tip, cmd) in
         [("hdr-github", Icon::Code, "EffectCraft on GitHub", "help.github"), ("hdr-web", Icon::Globe, "EffectCraft on getartcraft.com", "help.appPage")]
     {
