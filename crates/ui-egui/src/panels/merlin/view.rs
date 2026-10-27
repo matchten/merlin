@@ -46,6 +46,7 @@ enum Act {
     Attach,
     Unattach(usize),
     Suggest(usize),
+    ToggleStyle,
     PinFrame,
     PinLayers,
     BuildPlan(usize),
@@ -94,6 +95,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     header_ui(app, ui, header, &look, now, &mut acts);
     if app.ui.merlin.settings_open {
         settings_ui(app, ui, Rect::from_min_max(middle.min, rect.max), &look, &mut acts);
+    } else if app.ui.merlin.style_open {
+        super::style_view::show(app, ui, Rect::from_min_max(middle.min, rect.max), &look);
     } else {
         if app.ui.merlin.marking_note.is_some() {
             super::note_tabs::mark_ui(app, ui, body, &look);
@@ -118,7 +121,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Act::ToggleSettings => {
                 let p = &mut app.ui.merlin;
                 p.settings_open = !p.settings_open;
+                p.style_open = false;
                 p.rt.key_status = None;
+            }
+            Act::ToggleStyle => {
+                let p = &mut app.ui.merlin;
+                p.style_open = !p.style_open;
+                p.settings_open = false;
             }
             Act::Keep(t) => native::decide(app, &ctx, t, true),
             Act::Revert(t) => native::decide(app, &ctx, t, false),
@@ -270,6 +279,28 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
         acts.push(Act::ToggleSettings);
     }
     let mut right = settings.min.x - 4.0;
+    // Style kit: the kit's colours as dots.
+    let style = Rect::from_center_size(pos2(right - 13.0, cy), vec2(26.0, 26.0));
+    let style_on = app.ui.merlin.style_open;
+    let resp = icon_btn(ui, style, Icon::Checker, style_on, true, look, "style");
+    ui.painter().rect_filled(
+        style.shrink(3.0),
+        6.0,
+        if style_on {
+            look.magic.gamma_multiply(0.22)
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            t.panel_bg
+        },
+    );
+    super::style_view::paint_dots(ui.painter(), style.center(), super::native::active_kit(&app.ui.merlin), look, 3.6);
+    app.auto.add("merlin.style", style, "Style kit");
+    if resp.on_hover_text(if style_on { tr("Back to chat") } else { tr("Style kit: palette, fonts, motion") }).clicked() {
+        acts.push(Act::ToggleStyle);
+    }
+    right = style.min.x - 2.0;
+    let open = open || style_on;
     if !open {
         let new_chat = Rect::from_center_size(pos2(right - 13.0, cy), vec2(26.0, 26.0));
         let resp = icon_btn(ui, new_chat, Icon::Plus, false, !busy, look, "newChat");
@@ -1107,6 +1138,10 @@ fn context_chips(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Lo
             clickable.push(("time", cr, tr("Pin this frame to your message (or type @)"), Act::PinFrame));
         }
     }
+    // The style kit, last.
+    if r.max.x - x >= 30.0 {
+        super::style_view::chip(app, ui, pos2(x, cy), r.max.x - x, look);
+    }
     for (id, cr, tip, act) in clickable {
         let resp = ui.interact(cr, egui::Id::unique(("merlin-ctx", id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         app.auto.add(&format!("merlin.context.{id}"), cr, tip);
@@ -1190,7 +1225,7 @@ fn chips_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, left: f32, right: f32, 
 
 // ------------------------------------------------------------------ settings
 
-fn section(ui: &mut egui::Ui, title: &str, look: &Look, body: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn section(ui: &mut egui::Ui, title: &str, look: &Look, body: impl FnOnce(&mut egui::Ui)) {
     ui.label(RichText::new(title).font(Tokens::semibold(11.5)).color(look.t.text_faint));
     ui.add_space(2.0);
     egui::Frame::new().fill(look.card).stroke(Stroke::new(1.0, look.border)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(12)).show(

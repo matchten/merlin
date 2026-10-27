@@ -18,6 +18,8 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod note_tabs;
 #[cfg(not(target_arch = "wasm32"))]
+mod style_view;
+#[cfg(not(target_arch = "wasm32"))]
 mod timeline_hook;
 #[cfg(not(target_arch = "wasm32"))]
 mod view;
@@ -58,6 +60,10 @@ pub struct MerlinPanel {
     pub pins: Vec<Pin>,
     /// Act (build) or Plan (propose timed beats first).
     pub mode: Mode,
+    /// The style kit view replaces the chat.
+    pub style_open: bool,
+    /// The project's style kit (a name in the kit library; empty: none).
+    pub active_style: String,
     #[serde(skip)]
     pub(crate) rt: Runtime,
 }
@@ -74,6 +80,8 @@ pub struct MerlinSettings {
     pub base_url: String,
     /// Anthropic effort: `low` … `max`; empty means `high`.
     pub effort: String,
+    /// The style kit last used (for projects that haven't picked one, and unsaved ones).
+    pub style: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

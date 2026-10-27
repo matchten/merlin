@@ -789,3 +789,92 @@ fn the_chat_is_saved_with_the_project() {
     assert!(matches!(h.state().ui.merlin.notes[0].status, merlin_agent::notes::NoteStatus::Addressed { .. }));
     assert!(h.state().ui.merlin.items.iter().all(|i| !matches!(i, ChatItem::Turn { decision: Decision::Pending, .. })));
 }
+
+/// Style kits: make one in the view, give it colours; Merlin gets it with each message, adds to it
+/// when asked to remember, and the project keeps its choice.
+#[test]
+fn style_kits_are_made_followed_and_remembered() {
+    let mut h = harness();
+    board(&mut h);
+    click(&mut h, "merlin.style");
+    assert!(h.state().ui.merlin.style_open);
+    h.run_steps(2);
+    click(&mut h, "merlin.style.new");
+    assert_eq!(h.state().ui.merlin.active_style, "New kit");
+    h.run_steps(2);
+    click(&mut h, "merlin.style.addColor");
+    h.run_steps(2);
+    click(&mut h, "merlin.style.feel.bouncy");
+    h.run_steps(2);
+    // Agents set whole kits.
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"style": "Nope"})).is_err());
+    set(
+        h.state_mut(),
+        &ctx,
+        &serde_json::json!({"styleKit": {"name": "Ember", "palette": [{"name": "Ember", "hex": "#F26B21"}], "fonts": ["Inter"], "notes": "No pure white"}}),
+    )
+    .unwrap();
+    assert_eq!(h.state().ui.merlin.active_style, "Ember");
+    assert_eq!(h.state().ui.merlin.settings.style, "Ember", "the default for other projects too");
+    click(&mut h, "merlin.style");
+    assert!(!h.state().ui.merlin.style_open, "back to chat");
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.context.style").is_some(), "the kit shows in the composer");
+
+    // Save the project, then ask Merlin to remember: the kit grows and the chat file has the block.
+    let d = temp_dir("style");
+    let proj = d.join("Styled.ecproj");
+    let chat = d.join("Styled.merlin.json");
+    let _ = std::fs::remove_file(&chat);
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    h.state_mut().ui.merlin.input = "remember to keep it warm".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    let ember = h.state().ui.merlin.items.iter().any(|i| matches!(i, ChatItem::Notice { text, .. } if text.contains("Ember") && text.contains("1 colour")));
+    assert!(ember, "{:#?}", h.state().ui.merlin.items);
+    for _ in 0..600 {
+        h.run_steps(1);
+        if std::fs::read_to_string(&chat).is_ok_and(|t| t.contains("style_kit") && t.contains("\"style\":\"Ember\"")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(&chat).unwrap();
+    assert!(text.contains("<style_kit name=\\\"Ember\\\">"), "Merlin got the kit");
+    assert!(text.contains("\"style\":\"Ember\""), "the project keeps its kit");
+
+    // Another project starts with the last-used kit and can choose none; this one comes back with Ember.
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": d.join("Plain.ecproj").to_string_lossy()})).unwrap();
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": d.join("Plain.ecproj").to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.merlin.active_style, "Ember");
+    set(h.state_mut(), &ctx, &serde_json::json!({"style": ""})).unwrap();
+    assert_eq!(h.state().ui.merlin.active_style, "");
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.merlin.active_style, "Ember");
+}
+
+/// Writes `target/test-out/merlin-style.png` (the style kit view):
+/// `cargo test -p effectcraft-ui-egui --test it merlin_style_snapshot -- --ignored`.
+#[test]
+#[ignore]
+fn merlin_style_snapshot() {
+    let mut h = harness();
+    board(&mut h);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(
+        h.state_mut(),
+        &ctx,
+        &serde_json::json!({"styleKit": {"name": "Ember", "palette": [{"name": "Ember", "hex": "#F26B21"}, {"name": "Charcoal", "hex": "#1E1E1E"}, {"name": "Cream", "hex": "#F5EBDD"}], "fonts": ["Inter"], "motion": {"feel": "snappy", "overshoot": 0.12}, "notes": "Never pure white; logo bottom right."}}),
+    )
+    .unwrap();
+    click(&mut h, "merlin.style");
+    h.run_steps(6);
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-style.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    h.render().expect("render").save(out).unwrap();
+}

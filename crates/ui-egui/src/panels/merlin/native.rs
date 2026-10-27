@@ -27,6 +27,8 @@ use crate::i18n::{tr, tr_args};
 
 /// Settings store entry.
 const SETTINGS_ENTRY: &str = "merlin.json";
+/// The style kit library, in the settings store.
+const KITS_ENTRY: &str = "merlin-styles.json";
 /// How long a stopped turn may take to wind down before the panel stops waiting for it.
 const STOP_GRACE_SECS: f64 = 20.0;
 /// A tool request unanswered this long (the app is stuck) fails the call.
@@ -118,6 +120,12 @@ pub(crate) struct Runtime {
     pub(super) mention_off: Option<usize>,
     /// The pin chips' height last frame (they wrap in a narrow panel).
     pub(super) pins_h: f32,
+    /// The style kit library.
+    pub(super) kits: Vec<merlin_agent::style::StyleKit>,
+    /// Font families for the style view (read once).
+    pub(super) font_list: Option<Vec<String>>,
+    /// Images picked for "From image…" in the style view.
+    pub(super) style_picks: Option<(Sender<Vec<String>>, Receiver<Vec<String>>)>,
     /// The project file the chat belongs to (`Some(None)`: an unsaved project), once known.
     chat_for: Option<Option<String>>,
     /// The project state seen last frame (to tell Save As from opening another project).
@@ -165,7 +173,54 @@ pub(super) fn ensure_loaded(app: &mut EffectcraftApp) {
     if s.provider.is_empty() {
         s.provider = ProviderKind::default().id().into();
     }
+    app.ui.merlin.active_style = s.style.clone();
     app.ui.merlin.settings = s;
+    app.ui.merlin.rt.kits = app.session.config.as_ref().and_then(|c| c.read(KITS_ENTRY)).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+}
+
+/// The project's style kit, if it has one.
+pub(super) fn active_kit(panel: &super::MerlinPanel) -> Option<&merlin_agent::style::StyleKit> {
+    (!panel.active_style.is_empty()).then(|| panel.rt.kits.iter().find(|k| k.name == panel.active_style)).flatten()
+}
+
+/// Write the kit library to the settings store.
+pub(super) fn save_kits(app: &mut EffectcraftApp) {
+    let Some(store) = app.session.config.clone() else { return };
+    if let Ok(text) = serde_json::to_string_pretty(&app.ui.merlin.rt.kits)
+        && let Err(e) = store.write(KITS_ENTRY, &text)
+    {
+        app.ui.status = format!("Merlin style kits: {e}");
+    }
+}
+
+/// Make `name` the project's kit (and the default for projects that haven't picked one).
+pub(super) fn set_active_kit(app: &mut EffectcraftApp, name: &str) {
+    app.ui.merlin.active_style = name.to_string();
+    if app.ui.merlin.settings.style != name {
+        app.ui.merlin.settings.style = name.to_string();
+        save_settings(app);
+    }
+}
+
+/// Merlin saved something to the kit: merge it into the active kit (making one if there is none).
+fn remember(app: &mut EffectcraftApp, u: merlin_agent::style::StyleUpdate) {
+    if active_kit(&app.ui.merlin).is_none() {
+        let mut name = tr("Project style").to_string();
+        let mut n = 2;
+        while app.ui.merlin.rt.kits.iter().any(|k| k.name == name) {
+            name = format!("{} {n}", tr("Project style"));
+            n += 1;
+        }
+        app.ui.merlin.rt.kits.push(merlin_agent::style::StyleKit { name: name.clone(), ..Default::default() });
+        set_active_kit(app, &name);
+    }
+    let active = app.ui.merlin.active_style.clone();
+    let Some(kit) = app.ui.merlin.rt.kits.iter_mut().find(|k| k.name == active) else { return };
+    let changed = merlin_agent::style::merge(kit, &u);
+    if !changed.is_empty() {
+        save_kits(app);
+        notice(app, tr_args("Saved {} to the style kit “{}”.", &[&changed.join(", "), &active]), false);
+    }
 }
 
 pub(super) fn save_settings(app: &mut EffectcraftApp) {
@@ -378,7 +433,8 @@ pub(super) fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let time = app.session.active_comp_id().map(|c| agent_time(app, c.0, app.session.time()));
     let (pins, scope) = super::mentions::briefs(app);
     let plan_mode = app.ui.merlin.mode == Mode::Plan;
-    let turn_ctx = TurnContext { time, notes: briefs, pins, plan_mode, current_plan: if plan_mode { current_plan(app) } else { None } };
+    let style = active_kit(&app.ui.merlin).map(merlin_agent::style::block);
+    let turn_ctx = TurnContext { time, notes: briefs, pins, plan_mode, current_plan: if plan_mode { current_plan(app) } else { None }, style };
     let panel = &mut app.ui.merlin;
     let pin_labels: Vec<String> = std::mem::take(&mut panel.pins).into_iter().map(|p| if p.locked { format!("🔒 {}", p.label) } else { p.label }).collect();
     panel.rt.mention_off = None;
@@ -537,8 +593,31 @@ pub fn attach_paths(app: &mut EffectcraftApp, ctx: &egui::Context, paths: Vec<St
 /// * `removeNote`: a note id;
 /// * `pin`: `{layer | frame | range | note, locked?}` (layer id, comp seconds, `[s, s]`, note id)
 ///   pins the next message, as an `@` mention does;
-/// * `applyNotes`: `true` sends the typed message and the notes ready to apply.
+/// * `applyNotes`: `true` sends the typed message and the notes ready to apply;
+/// * `styleKit`: a kit (`{name, palette: [{name, hex}], fonts, motion: {feel, overshoot}, notes}`)
+///   added to the library (replacing one of the same name) and made the project's;
+/// * `style`: the name of the project's kit (`""` for none).
 pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) -> Result<(), String> {
+    if let Some(k) = v.get("styleKit") {
+        let kit: merlin_agent::style::StyleKit = serde_json::from_value(k.clone()).map_err(|e| format!("merlin.styleKit: {e}"))?;
+        if kit.name.trim().is_empty() {
+            return Err("merlin.styleKit: the kit needs a name".into());
+        }
+        let name = kit.name.clone();
+        let kits = &mut app.ui.merlin.rt.kits;
+        match kits.iter_mut().find(|x| x.name == name) {
+            Some(x) => *x = kit,
+            None => kits.push(kit),
+        }
+        save_kits(app);
+        set_active_kit(app, &name);
+    }
+    if let Some(name) = v.get("style").and_then(Value::as_str) {
+        if !name.is_empty() && !app.ui.merlin.rt.kits.iter().any(|k| k.name == name) {
+            return Err(format!("merlin.style: no kit named `{name}`"));
+        }
+        set_active_kit(app, name);
+    }
     if let Some(n) = v.get("note") {
         let secs = |k: &str| n.get(k).and_then(Value::as_f64).map(Tick::from_seconds_f64);
         let start = secs("time").ok_or("merlin.note: `time` (comp seconds) is required")?;
@@ -760,7 +839,7 @@ fn apply_event(app: &mut EffectcraftApp, e: AgentEvent) {
             }
         }
         AgentEvent::Usage(_) => {}
-        AgentEvent::PlanProposed { .. } => {}
+        AgentEvent::PlanProposed { .. } | AgentEvent::StyleRemembered(_) => {}
         AgentEvent::NoteFrame { id, png } => {
             let key = format!("note-before:{id}");
             panel.rt.textures.remove(&key);
@@ -960,6 +1039,7 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     for e in events {
         match e {
             AgentEvent::PlanProposed { title, beats } => take_plan(app, title, beats),
+            AgentEvent::StyleRemembered(u) => remember(app, u),
             e => apply_event(app, e),
         }
     }
@@ -988,6 +1068,8 @@ struct SavedChat {
     conversation: Vec<Message>,
     /// PNG (base64) by frame key (`note-before:3`, `note-after:3`).
     note_frames: std::collections::BTreeMap<String, String>,
+    /// The project's style kit (a name in the library).
+    style: String,
 }
 
 fn chat_path(project: &str) -> std::path::PathBuf {
@@ -997,7 +1079,7 @@ fn chat_path(project: &str) -> std::path::PathBuf {
 fn fingerprint(panel: &super::MerlinPanel) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(&(&panel.items, &panel.notes)).unwrap_or_default().hash(&mut h);
+    serde_json::to_string(&(&panel.items, &panel.notes, &panel.active_style)).unwrap_or_default().hash(&mut h);
     panel.rt.conversation.len().hash(&mut h);
     h.finish()
 }
@@ -1006,7 +1088,7 @@ fn fingerprint(panel: &super::MerlinPanel) -> u64 {
 fn save_chat(app: &mut EffectcraftApp, project: &str) {
     let panel = &app.ui.merlin;
     let path = chat_path(project);
-    if panel.items.is_empty() && panel.notes.is_empty() {
+    if panel.items.is_empty() && panel.notes.is_empty() && panel.active_style == panel.settings.style {
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
@@ -1019,7 +1101,14 @@ fn save_chat(app: &mut EffectcraftApp, project: &str) {
         .filter(|(k, _)| k.starts_with("note-"))
         .filter_map(|(k, v)| v.first().map(|png| (k.clone(), merlin_agent::base64::encode(png))))
         .collect();
-    let saved = SavedChat { version: 1, items: panel.items.clone(), notes: panel.notes.clone(), conversation: panel.rt.conversation.clone(), note_frames };
+    let saved = SavedChat {
+        version: 1,
+        items: panel.items.clone(),
+        notes: panel.notes.clone(),
+        conversation: panel.rt.conversation.clone(),
+        note_frames,
+        style: panel.active_style.clone(),
+    };
     let text = match serde_json::to_string(&saved) {
         Ok(t) => t,
         Err(e) => {
@@ -1042,6 +1131,7 @@ fn reset_chat(app: &mut EffectcraftApp) {
     p.notes.clear();
     p.pins.clear();
     p.open_notes.clear();
+    p.active_style = p.settings.style.clone();
     p.rt.stretching = None;
     p.marking_note = None;
     p.rt.conversation.clear();
@@ -1061,6 +1151,9 @@ fn load_chat(app: &mut EffectcraftApp, project: &str) {
     let p = &mut app.ui.merlin;
     p.items = saved.items;
     p.notes = saved.notes;
+    if p.rt.kits.iter().any(|k| k.name == saved.style) {
+        p.active_style = saved.style;
+    }
     // Undo history isn't saved: past turns can't be reverted any more, notes in flight reopen.
     for it in &mut p.items {
         match it {
