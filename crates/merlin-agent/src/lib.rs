@@ -54,7 +54,7 @@ pub enum Error {
     #[error("unexpected reply from {provider}: {message}")]
     Protocol { provider: &'static str, message: String },
     /// No API key for the chosen provider.
-    #[error("no API key for {0}: set it in Settings ▸ Agent or the {1} environment variable")]
+    #[error("no API key for {0}: save one in the Merlin panel's Settings, or set the {1} environment variable")]
     NoKey(&'static str, &'static str),
     /// The OS keychain refused or is unavailable.
     #[error("keychain: {0}")]
