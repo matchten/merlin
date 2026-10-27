@@ -522,6 +522,8 @@ impl EffectcraftApp {
         let typing = ctx.egui_wants_keyboard_input();
         let events = events.into_iter().filter(|event| !typing && !matches!(event, egui::Event::Text(_) | egui::Event::Ime(_)));
         self.forwarded.events.extend(events);
+        // A floating Merlin window keeps its files (attachments).
+        let files = crate::panels::merlin::take_window_files(self, ctx, files);
         self.forwarded.files.extend(files.into_iter().flat_map(|window| window.dropped));
         if !self.forwarded.events.is_empty() || !self.forwarded.files.is_empty() {
             ctx.request_repaint();

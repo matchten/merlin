@@ -10,15 +10,17 @@ use std::time::Duration;
 
 use egui::{Align, Color32, Layout, Rect, RichText, Sense, pos2, vec2};
 use merlin_agent::agent_loop::{AgentEvent, TurnEnd, TurnOutcome, turn_label};
+use merlin_agent::attachment::{self, Attachment};
 use merlin_agent::checkpoint::Checkpoint;
 use merlin_agent::conversation::{Message, Part};
 use merlin_agent::keys::{self, KeySource};
 use merlin_agent::{AgentConfig, ProviderKind, RemoteHost, providers, run_turn, transport};
 use serde_json::{Value, json};
 
-use super::{ChatItem, Decision, MerlinSettings, ToolState};
+use super::{AttachState, Attached, ChatItem, Decision, MerlinSettings, ToolState};
 use crate::EffectcraftApp;
 use crate::control::{self, ControlRequest, Outcome};
+use crate::dock::PanelKind;
 use crate::i18n::{tr, tr_args};
 
 /// Settings store entry.
@@ -33,11 +35,19 @@ const INPUT_PREVIEW_CHARS: usize = 4000;
 const MAX_CHECKPOINTS: usize = 20;
 /// Thumbnail width in the chat.
 const THUMB_W: f32 = 112.0;
+/// Height of the attachment chips row.
+const CHIPS_H: f32 = 28.0;
 
 /// Messages from a turn's worker thread.
 enum WorkerMsg {
     Event(AgentEvent),
     Done { outcome: TurnOutcome, conversation: Vec<Message> },
+}
+
+/// Attachment decodes and attach-dialog answers, from background threads.
+enum AttachMsg {
+    Picked(Vec<String>),
+    Loaded(String, Result<Attachment, String>),
 }
 
 struct Worker {
@@ -62,13 +72,21 @@ pub(crate) struct Runtime {
     deferred: Vec<(ControlRequest, f64)>,
     next_turn: u64,
     checkpoints: Vec<(u64, Checkpoint)>,
-    /// Rendered frames by tool call id (PNG) and their textures.
+    /// Images shown in the chat (PNG) and their textures: a tool call's rendered frames by call
+    /// id, an attached file's picture by `att:<path>`.
     frames: HashMap<String, Vec<Vec<u8>>>,
     textures: HashMap<String, Vec<egui::TextureHandle>>,
     /// Key status for the settings view (provider, where it comes from, masked key).
     key_status: Option<(ProviderKind, KeySource, String)>,
     /// The key being typed in settings: never serialized, cleared once saved.
     key_draft: String,
+    /// Decoded attachments of the message being written, by path.
+    attachments: HashMap<String, Attachment>,
+    attach_msgs: Option<(Sender<AttachMsg>, Receiver<AttachMsg>)>,
+    /// Files are being dragged over the panel (set by the drop hooks, cleared once drawn).
+    drop_hover: bool,
+    /// The attachment chips' height last frame (they wrap onto more rows in a narrow panel).
+    chips_h: f32,
 }
 
 impl Clone for Runtime {
@@ -133,7 +151,7 @@ fn notice(app: &mut EffectcraftApp, text: impl Into<String>, error: bool) {
 /// Send the typed message as a new turn.
 fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let text = app.ui.merlin.input.trim().to_string();
-    if text.is_empty() || app.ui.merlin.rt.worker.is_some() {
+    if !can_send(&app.ui.merlin) || app.ui.merlin.rt.worker.is_some() {
         return;
     }
     let cfg = app.ui.merlin.settings.config();
@@ -146,7 +164,21 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let checkpoint = Checkpoint::take(&app.session);
     let panel = &mut app.ui.merlin;
     panel.input.clear();
-    panel.items.push(ChatItem::User { text: text.clone() });
+    // Pictures first, then the words (what the providers recommend); failed chips are dropped.
+    let mut parts = vec![];
+    let mut sent = vec![];
+    for a in std::mem::take(&mut panel.attachments) {
+        if let Some(decoded) = panel.rt.attachments.remove(&a.path) {
+            parts.push(decoded.part());
+            sent.push(a);
+        }
+    }
+    panel.rt.attachments.clear();
+    if !text.is_empty() {
+        parts.push(Part::Text { text: text.clone() });
+    }
+    let request = if text.is_empty() { sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ") } else { text.clone() };
+    panel.items.push(ChatItem::User { text, attachments: sent.into_iter().map(|a| a.path).collect() });
     let rt = &mut panel.rt;
     rt.next_turn = rt.next_turn.saturating_add(1);
     let turn = rt.next_turn;
@@ -155,7 +187,6 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let cancel = Arc::new(AtomicBool::new(false));
     let conversation = std::mem::take(&mut rt.conversation);
     let (ctx_req, ctx_ev, cancel_req, cancel_turn) = (ctx.clone(), ctx.clone(), cancel.clone(), cancel.clone());
-    let request = text.clone();
     let spawned = std::thread::Builder::new().name("merlin-turn".into()).spawn(move || {
         // The keychain is read here, off the UI thread (macOS may ask the user first).
         let key = if cfg.provider.needs_key() || cfg.provider == ProviderKind::Custom { keys::get(cfg.provider).0.unwrap_or_default() } else { String::new() };
@@ -175,7 +206,7 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
             &mut host,
             &cfg,
             &mut conversation,
-            vec![Part::Text { text }],
+            parts,
             &mut |e| {
                 let _ = ev_tx.send(WorkerMsg::Event(e));
                 ctx_ev.request_repaint();
@@ -192,6 +223,176 @@ fn start_turn(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
         Err(e) => notice(app, tr_args("Merlin couldn't start: {}", &[&e]), true),
     }
+}
+
+/// Whether the message can be sent: words or ready attachments, and no attachment still loading.
+fn can_send(panel: &super::MerlinPanel) -> bool {
+    let loading = panel.attachments.iter().any(|a| a.state == AttachState::Loading);
+    let ready = panel.attachments.iter().any(|a| a.state == AttachState::Ready);
+    !loading && (ready || !panel.input.trim().is_empty())
+}
+
+// ------------------------------------------------------------------ attachments
+
+/// Attach files to the next message. They are decoded on a background thread (a big PDF page can
+/// take a moment); their chips show progress, and Send waits for them.
+pub fn attach_paths(app: &mut EffectcraftApp, ctx: &egui::Context, paths: Vec<String>) {
+    let panel = &mut app.ui.merlin;
+    let mut fresh = vec![];
+    let mut over = 0usize;
+    for path in paths {
+        if path.is_empty() || panel.attachments.iter().any(|a| a.path == path) {
+            continue;
+        }
+        if panel.attachments.len() >= attachment::MAX_PER_MESSAGE {
+            over += 1;
+            continue;
+        }
+        let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+        panel.attachments.push(Attached { path: path.clone(), name, state: AttachState::Loading, info: String::new() });
+        fresh.push(path);
+    }
+    if over > 0 {
+        notice(app, tr_args("A message can carry up to {} files; {} more weren't attached.", &[&attachment::MAX_PER_MESSAGE, &over]), true);
+    }
+    if fresh.is_empty() {
+        return;
+    }
+    app.ui.merlin.settings_open = false;
+    let tx = app.ui.merlin.rt.attach_msgs.get_or_insert_with(mpsc::channel).0.clone();
+    let c = ctx.clone();
+    let todo = fresh.clone();
+    let spawned = std::thread::Builder::new().name("merlin-attach".into()).spawn(move || {
+        for path in todo {
+            let r = attachment::load(&path);
+            if tx.send(AttachMsg::Loaded(path, r)).is_err() {
+                return;
+            }
+            c.request_repaint();
+        }
+    });
+    if let Err(e) = spawned {
+        for a in app.ui.merlin.attachments.iter_mut().filter(|a| fresh.contains(&a.path)) {
+            a.state = AttachState::Failed;
+            a.info = e.to_string();
+        }
+    }
+}
+
+/// `ui.set {"merlin": {...}}` from the control channel: `attach` (absolute paths) attaches files
+/// as a drop would, for agents and scripts that can't drag.
+pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) -> Result<(), String> {
+    let Some(list) = v.get("attach") else { return Ok(()) };
+    let paths: Vec<String> =
+        list.as_array().ok_or("merlin.attach: expected an array of absolute paths")?.iter().filter_map(Value::as_str).map(str::to_string).collect();
+    if let Some(bad) = paths.iter().find(|p| !std::path::Path::new(p).is_absolute()) {
+        return Err(format!("merlin.attach: `{bad}` is not an absolute path"));
+    }
+    attach_paths(app, ctx, paths);
+    Ok(())
+}
+
+/// Take in decoded attachments and attach-dialog answers.
+fn take_attachments(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let Some((tx, rx)) = app.ui.merlin.rt.attach_msgs.take() else { return };
+    let mut picked = vec![];
+    while let Ok(m) = rx.try_recv() {
+        match m {
+            AttachMsg::Picked(paths) => picked.extend(paths),
+            AttachMsg::Loaded(path, result) => {
+                let panel = &mut app.ui.merlin;
+                // A chip removed while loading takes its result with it.
+                let Some(chip) = panel.attachments.iter_mut().find(|a| a.path == path) else { continue };
+                match result {
+                    Ok(a) => {
+                        chip.state = AttachState::Ready;
+                        chip.info = format!("{} · {}×{}{}", a.format, a.width, a.height, if a.video { tr(" · first frame") } else { "" });
+                        panel.rt.textures.remove(&format!("att:{path}"));
+                        panel.rt.frames.insert(format!("att:{path}"), vec![a.png.clone()]);
+                        panel.rt.attachments.insert(path, a);
+                    }
+                    Err(e) => {
+                        chip.state = AttachState::Failed;
+                        chip.info = e;
+                    }
+                }
+            }
+        }
+    }
+    app.ui.merlin.rt.attach_msgs = Some((tx, rx));
+    if !picked.is_empty() {
+        attach_paths(app, ctx, picked);
+    }
+}
+
+/// The Attach button: the host's file dialog (without blocking the frame where it can).
+fn pick_attachments(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let exts = attachment::extensions();
+    if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
+        let tx = app.ui.merlin.rt.attach_msgs.get_or_insert_with(mpsc::channel).0.clone();
+        let c = ctx.clone();
+        spawn(
+            crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: true },
+            Box::new(move |paths| {
+                let _ = tx.send(AttachMsg::Picked(paths));
+                c.request_repaint();
+            }),
+        );
+    } else if let Some(pick) = app.hooks.pick_files.as_ref() {
+        let paths = pick(&exts);
+        attach_paths(app, ctx, paths);
+    } else {
+        notice(app, tr("No file dialog here: drag files onto the Merlin panel to attach them."), true);
+    }
+}
+
+fn local_paths(files: &[egui::DroppedFileHandle]) -> Vec<String> {
+    files.iter().filter(|f| f.path().is_absolute()).map(|f| f.path().to_string_lossy().into_owned()).collect()
+}
+
+/// Files dragged over or dropped on the Merlin panel docked in the main window become attachments
+/// rather than imports. The panel under the pointer decides, else the focused panel: the window
+/// system may send no pointer moves while files are dragged in (macOS). Returns whether Merlin
+/// took them (the caller then neither imports nor shows its import hint).
+pub fn take_main_window_files(app: &mut EffectcraftApp, ctx: &egui::Context) -> bool {
+    let (hovering, dropped, pos) = ctx.input(|i| (!i.raw.hovered_files.is_empty(), local_paths(&i.raw.dropped_files), i.pointer.hover_pos()));
+    let any_dropped = ctx.input(|i| !i.raw.dropped_files.is_empty());
+    if !hovering && !any_dropped {
+        return false;
+    }
+    let shown = app.dock_rects.iter().any(|(k, _)| *k == PanelKind::Merlin) && !app.in_panel_window(PanelKind::Merlin);
+    if !shown || app.panel_at(pos) != PanelKind::Merlin {
+        return false;
+    }
+    if hovering {
+        app.ui.merlin.rt.drop_hover = true;
+        ctx.request_repaint();
+    }
+    if !dropped.is_empty() {
+        attach_paths(app, ctx, dropped);
+    }
+    true
+}
+
+/// Files dragged over or dropped on a floating window showing Merlin are its attachments; the rest
+/// go on to import.
+pub fn take_window_files(
+    app: &mut EffectcraftApp,
+    ctx: &egui::Context,
+    files: Vec<craft_ui::docking::WindowFiles<PanelKind>>,
+) -> Vec<craft_ui::docking::WindowFiles<PanelKind>> {
+    let (mine, rest): (Vec<_>, Vec<_>) = files.into_iter().partition(|w| w.panel == PanelKind::Merlin);
+    for w in mine {
+        if !w.hovered.is_empty() {
+            app.ui.merlin.rt.drop_hover = true;
+            ctx.request_repaint();
+        }
+        let paths = local_paths(&w.dropped);
+        if !paths.is_empty() {
+            attach_paths(app, ctx, paths);
+        }
+    }
+    rest
 }
 
 fn stop_turn(app: &mut EffectcraftApp, now: f64) {
@@ -315,6 +516,7 @@ fn decide(app: &mut EffectcraftApp, ctx: &egui::Context, turn: u64, keep: bool) 
 /// take in their progress.
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
+    take_attachments(app, ctx);
     if let Some((tx, rx)) = app.ui.merlin.rt.requests.take() {
         let mut reqs = std::mem::take(&mut app.ui.merlin.rt.deferred);
         while let Ok(r) = rx.try_recv() {
@@ -382,6 +584,8 @@ enum Act {
     Toggle(usize),
     SaveKey,
     RemoveKey,
+    Attach,
+    Unattach(usize),
 }
 
 /// The panel: a header (provider · model, New Chat, Settings), the conversation and the input, or
@@ -391,7 +595,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     let now = app.now();
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), 30.0));
-    let footer_h = 122.0_f32.min(rect.height() * 0.5);
+    let chips = if app.ui.merlin.attachments.is_empty() { 0.0 } else { app.ui.merlin.rt.chips_h.max(CHIPS_H) + 4.0 };
+    let footer_h = (122.0 + chips).min(rect.height() * 0.5);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
     let body = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
     let mut acts = vec![];
@@ -402,6 +607,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         log_ui(app, ui, body, &mut acts);
         footer_ui(app, ui, footer, &mut acts);
     }
+    if std::mem::take(&mut app.ui.merlin.rt.drop_hover) {
+        drop_hint(app, ui, rect);
+    }
     for a in acts {
         match a {
             Act::Send => start_turn(app, &ctx),
@@ -411,8 +619,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let p = &mut app.ui.merlin;
                     p.items.clear();
                     p.rt.conversation.clear();
-                    p.rt.frames.clear();
+                    p.rt.frames.retain(|k, _| p.attachments.iter().any(|a| *k == format!("att:{}", a.path)));
                     p.rt.textures.clear();
+                }
+            }
+            Act::Attach => pick_attachments(app, &ctx),
+            Act::Unattach(i) => {
+                let p = &mut app.ui.merlin;
+                if i < p.attachments.len() {
+                    let a = p.attachments.remove(i);
+                    p.rt.attachments.remove(&a.path);
                 }
             }
             Act::ToggleSettings => {
@@ -500,10 +716,16 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Vec<A
         let latest: Vec<u64> = panel.rt.checkpoints.iter().filter(|(_, cp)| cp.is_latest(session)).map(|(id, _)| *id).collect();
         for (i, item) in panel.items.iter().enumerate() {
             match item {
-                ChatItem::User { text } => {
+                ChatItem::User { text, attachments } => {
                     egui::Frame::new().fill(t.field_bg).inner_margin(egui::Margin::same(8)).corner_radius(egui::CornerRadius::same(6)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(RichText::new(text).color(t.text)).wrap());
+                        if !attachments.is_empty() {
+                            let keys: Vec<String> = attachments.iter().map(|p| format!("att:{p}")).collect();
+                            thumbnails(ui, &ctx, &mut panel.rt, &keys);
+                        }
+                        if !text.is_empty() {
+                            ui.add(egui::Label::new(RichText::new(text).color(t.text)).wrap());
+                        }
                     });
                 }
                 ChatItem::Assistant { text } => {
@@ -546,7 +768,7 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Vec<A
                         });
                     }
                     if *frames > 0 {
-                        thumbnails(ui, &ctx, &mut panel.rt, id);
+                        thumbnails(ui, &ctx, &mut panel.rt, std::slice::from_ref(id));
                     }
                 }
                 ChatItem::Turn { id, label, outcome, decision, tool_calls, input_tokens, output_tokens } => {
@@ -600,12 +822,12 @@ fn tokens(n: u64) -> String {
     if n >= 10_000 { format!("{}k", n / 1000) } else { n.to_string() }
 }
 
-/// A row of a tool call's rendered frames.
-fn thumbnails(ui: &mut egui::Ui, ctx: &egui::Context, rt: &mut Runtime, call: &str) {
-    if !rt.textures.contains_key(call) {
+/// The textures of the images under `key` in [`Runtime::frames`], made on first use.
+fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
+    if !rt.textures.contains_key(key) {
         let texs: Vec<egui::TextureHandle> = rt
             .frames
-            .get(call)
+            .get(key)
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
@@ -614,20 +836,41 @@ fn thumbnails(ui: &mut egui::Ui, ctx: &egui::Context, rt: &mut Runtime, call: &s
                 let img = image::load_from_memory(png).ok()?.to_rgba8();
                 let size = [img.width() as usize, img.height() as usize];
                 let ci = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-                Some(ctx.load_texture(format!("merlin-{call}-{i}"), ci, egui::TextureOptions::LINEAR))
+                Some(ctx.load_texture(format!("merlin-{key}-{i}"), ci, egui::TextureOptions::LINEAR))
             })
             .collect();
-        rt.textures.insert(call.to_string(), texs);
+        rt.textures.insert(key.to_string(), texs);
     }
-    let Some(texs) = rt.textures.get(call) else { return };
+    rt.textures.get(key).map(Vec::as_slice).unwrap_or_default()
+}
+
+fn paint_texture(ui: &egui::Ui, tex: &egui::TextureHandle, r: Rect) {
+    ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+}
+
+/// A row of the images under `keys` (a tool call's rendered frames, a message's attachments).
+fn thumbnails(ui: &mut egui::Ui, ctx: &egui::Context, rt: &mut Runtime, keys: &[String]) {
     ui.horizontal_wrapped(|ui| {
-        for tex in texs {
-            let [w, h] = tex.size();
-            let aspect = if w > 0 { h as f32 / w as f32 } else { 0.5625 };
-            let (r, _) = ui.allocate_exact_size(vec2(THUMB_W, THUMB_W * aspect), Sense::hover());
-            ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        for key in keys {
+            for tex in textures(ctx, rt, key) {
+                let [w, h] = tex.size();
+                let aspect = if w > 0 { (h as f32 / w as f32).clamp(0.2, 2.0) } else { 0.5625 };
+                let (r, _) = ui.allocate_exact_size(vec2(THUMB_W, THUMB_W * aspect), Sense::hover());
+                paint_texture(ui, tex, r);
+            }
         }
     });
+}
+
+/// Over the panel while files are dragged onto it.
+fn drop_hint(app: &mut EffectcraftApp, ui: &egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("merlin-drop")));
+    painter.rect_filled(rect.shrink(4.0), 6.0, t.panel_bg.gamma_multiply(0.85));
+    painter.rect_stroke(rect.shrink(6.0), 6.0, egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    let label = tr("Drop to attach to your message to Merlin");
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, crate::theme::Tokens::medium(14.0), t.text);
+    app.auto.add("merlin.dropTarget", rect, label);
 }
 
 /// The active comp, selection and time, as the agent will see them.
@@ -635,12 +878,14 @@ fn context_line(app: &EffectcraftApp) -> String {
     let s = &app.session;
     let Some(cid) = s.active_comp_id() else { return tr("No composition open: Merlin will create one if needed.").to_string() };
     let name = s.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
-    let selected = s.state.selected_layers.len();
+    let sel = &s.state.selected_layers;
     let time = format!("{:.2}s", s.time().seconds());
-    if selected == 0 {
-        tr_args("Comp “{}” · at {}", &[&name, &time])
-    } else {
-        tr_args("Comp “{}” · {} selected · at {}", &[&name, &selected, &time])
+    let names: Vec<String> = s.active_comp().map(|c| c.layers.iter().filter(|l| sel.contains(&l.id)).map(|l| l.name.clone()).collect()).unwrap_or_default();
+    match names.as_slice() {
+        [] => tr_args("Comp “{}” · at {}", &[&name, &time]),
+        [one] => tr_args("Comp “{}” · “{}” selected · at {}", &[&name, one, &time]),
+        [a, b] => tr_args("Comp “{}” · “{}”, “{}” selected · at {}", &[&name, a, b, &time]),
+        _ => tr_args("Comp “{}” · {} layers selected · at {}", &[&name, &names.len(), &time]),
     }
 }
 
@@ -650,7 +895,21 @@ fn footer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Ve
     let line = context_line(app);
     let busy = app.ui.merlin.busy;
     let mut c = child(ui, r.shrink2(vec2(8.0, 6.0)));
-    c.label(RichText::new(line).small().color(t.text_faint));
+    c.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let b = ui.small_button(tr("Attach…")).on_hover_text(tr("Attach images, Photoshop, SVG, PDF or Illustrator files (or drag them onto this panel)"));
+            app.auto.add("merlin.attach", b.rect, "Attach files");
+            if b.clicked() {
+                acts.push(Act::Attach);
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(line).small().color(t.text_faint)).truncate());
+            });
+        });
+    });
+    if !app.ui.merlin.attachments.is_empty() {
+        chips_ui(app, &mut c, acts);
+    }
     let input_id = egui::Id::unique("merlin-input");
     // Enter sends, Shift+Enter starts a new line.
     if !busy && c.ctx().memory(|m| m.has_focus(input_id)) && c.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
@@ -666,13 +925,80 @@ fn footer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Ve
         let resp = ui.add(te);
         app.auto.add_response("merlin.input", &resp, "Message Merlin");
         let (label, act) = if busy { (tr("Stop"), Act::Stop) } else { (tr("Send"), Act::Send) };
-        let enabled = busy || !app.ui.merlin.input.trim().is_empty();
+        let enabled = busy || can_send(&app.ui.merlin);
         let b = ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(52.0, 28.0)));
         app.auto.add("merlin.send", b.rect, if busy { "Stop" } else { "Send" });
         if b.clicked() {
             acts.push(act);
         }
     });
+}
+
+/// The attachments of the message being written: thumbnail, name, ×. Laid out by hand so the
+/// chips wrap onto more rows in a narrow panel.
+fn chips_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    const PAD: f32 = 5.0;
+    const THUMB: f32 = 18.0;
+    const X_W: f32 = 12.0;
+    const GAP: f32 = 4.0;
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let left = ui.cursor().min.x;
+    let right = ui.max_rect().max.x;
+    let top = ui.cursor().min.y;
+    let row_h = CHIPS_H - GAP;
+    let EffectcraftApp { ui: state, auto, .. } = app;
+    let panel = &mut state.merlin;
+    let (mut x, mut y) = (left, top);
+    for i in 0..panel.attachments.len() {
+        let Some(a) = panel.attachments.get(i).cloned() else { break };
+        let name: String = a.name.chars().take(28).collect();
+        let color = if a.state == AttachState::Failed { t.danger } else { t.text };
+        let galley = ui.painter().layout_no_wrap(name, font.clone(), color);
+        let w = (PAD + THUMB + GAP + galley.size().x + GAP + X_W + PAD).min(right - left);
+        if x > left && x + w > right {
+            x = left;
+            y += CHIPS_H;
+        }
+        let chip = Rect::from_min_size(pos2(x, y), vec2(w, row_h));
+        x += w + GAP;
+        let stroke = if a.state == AttachState::Failed { t.danger } else { t.field_border };
+        ui.painter().rect_filled(chip, 4.0, t.field_bg);
+        ui.painter().rect_stroke(chip, 4.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        let slot = Rect::from_min_size(pos2(chip.min.x + PAD, chip.center().y - THUMB / 2.0), vec2(THUMB, THUMB));
+        match a.state {
+            AttachState::Loading => egui::Spinner::new().size(THUMB - 4.0).paint_at(ui, slot.shrink(2.0)),
+            AttachState::Ready => {
+                if let Some(tex) = textures(&ctx, &mut panel.rt, &format!("att:{}", a.path)).first() {
+                    let [tw, th] = tex.size();
+                    let (tw, th) = (tw.max(1) as f32, th.max(1) as f32);
+                    let k = (THUMB / tw).min(THUMB / th);
+                    paint_texture(ui, tex, Rect::from_center_size(slot.center(), vec2(tw * k, th * k)));
+                }
+            }
+            AttachState::Failed => {
+                ui.painter().text(slot.center(), egui::Align2::CENTER_CENTER, "!", font.clone(), t.danger);
+            }
+        }
+        let name_pos = pos2(slot.max.x + GAP, chip.center().y - galley.size().y / 2.0);
+        ui.painter().with_clip_rect(chip).galley(name_pos, galley, color);
+        let resp = ui.interact(chip, egui::Id::unique(("merlin-chip", &a.path)), Sense::hover());
+        auto.add(&format!("merlin.attach.{i}"), chip, &a.name);
+        let tip = if a.state == AttachState::Loading { tr("Reading…").to_string() } else { format!("{}\n{}", a.path, a.info) };
+        resp.on_hover_text(tip);
+        let x_rect = Rect::from_min_size(pos2(chip.max.x - PAD - X_W, chip.min.y), vec2(X_W, row_h));
+        let x_resp = ui.interact(x_rect, egui::Id::unique(("merlin-chip-x", &a.path)), Sense::click());
+        let x_color = if x_resp.hovered() { t.text } else { t.text_dim };
+        ui.painter().text(x_rect.center(), egui::Align2::CENTER_CENTER, "×", font.clone(), x_color);
+        auto.add(&format!("merlin.attach.{i}.remove"), x_rect, "Remove attachment");
+        if x_resp.on_hover_text(tr("Remove")).clicked() {
+            acts.push(Act::Unattach(i));
+        }
+    }
+    let used = Rect::from_min_max(pos2(left, top), pos2(right, y + CHIPS_H));
+    ui.allocate_rect(used, Sense::hover());
+    panel.rt.chips_h = used.height();
 }
 
 fn settings_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, acts: &mut Vec<Act>) {

@@ -22,6 +22,18 @@ impl Default for Demo {
     }
 }
 
+/// The file names of the images attached to message `at` (their labels start with the name).
+fn attached(messages: &[Message], at: usize) -> Vec<String> {
+    let Some(m) = messages.get(at) else { return vec![] };
+    m.parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Image { label, .. } => Some(label.as_deref().and_then(|l| l.split(" (").next()).unwrap_or("image").to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The text of the latest user request (not tool results, not the editor context).
 fn request(messages: &[Message]) -> (usize, String) {
     for (i, m) in messages.iter().enumerate().rev() {
@@ -97,7 +109,11 @@ impl LlmProvider for Demo {
         let id = |n: usize| format!("demo_{at}_{n}");
         let (text, call, stop) = match step {
             0 => (
-                format!("Demo mode (no model is called). I'll build a title that says “{title}” and drop it in with a small bounce."),
+                {
+                    let files = attached(req.messages, at);
+                    let seen = if files.is_empty() { String::new() } else { format!(" I can see {} attached image(s): {}.", files.len(), files.join(", ")) };
+                    format!("Demo mode (no model is called).{seen} I'll build a title that says “{title}” and drop it in with a small bounce.")
+                },
                 Some((id(1), "run_script", json!({"code": script(&title)}))),
                 StopReason::ToolUse,
             ),

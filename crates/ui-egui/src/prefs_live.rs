@@ -29,6 +29,10 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
     use egui::{Align2, Stroke, StrokeKind, vec2};
 
     let ctx = ui.ctx().clone();
+    // Files dropped on the Merlin panel are attachments for the agent, not imports.
+    if crate::panels::merlin::take_main_window_files(app, &ctx) {
+        return;
+    }
     let hovered = ctx.input(|i| i.raw.hovered_files.len());
     if hovered != 0 {
         let label =

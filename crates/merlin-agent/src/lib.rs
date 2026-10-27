@@ -11,14 +11,16 @@
 //! * [`tools`]: the tool catalogue the model sees, each tool a thin mapping onto engine commands.
 //! * [`agent_loop`]: one user turn: stream a reply, run its tool calls, feed results back, repeat.
 //! * [`checkpoint`]: folds a turn's edits into one undo step and reverts it.
+//! * [`attachment`]: files the user attaches (images, PSD, SVG, PDF, AI…) decoded into labelled images.
 //! * [`keys`]: API keys from environment variables or the OS keychain, never from preferences.
 //!
-//! Layering: depends on `effectcraft-engine` and `effectcraft-automation` (PNG encoding), never on
-//! egui. Network and keychain code are desktop-only.
+//! Layering: depends on `effectcraft-engine`, `effectcraft-automation` (PNG encoding) and
+//! `effectcraft-media` (attachments), never on egui. Network and keychain code are desktop-only.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod agent_loop;
+pub mod attachment;
 pub mod checkpoint;
 pub mod config;
 pub mod context;

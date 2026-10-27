@@ -281,6 +281,12 @@ fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     {
         return err(e);
     }
+    // Window ▸ Merlin: `{"merlin": {"attach": [paths]}}` attaches files as a drop would.
+    if let Some(m) = p.get("merlin")
+        && let Err(e) = crate::panels::merlin::apply_ui_set(app, ctx, m)
+    {
+        return err(e);
+    }
     set_ui_layout(app, p)
 }
 

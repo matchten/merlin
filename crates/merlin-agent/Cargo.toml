@@ -12,6 +12,11 @@ workspace = true
 [dependencies]
 effectcraft-engine = { workspace = true }
 effectcraft-automation = { workspace = true }
+# Attachments: decoded like footage (stills, PSD, SVG, PDF, AI, EPS, a video's first frame).
+effectcraft-media = { workspace = true }
+effectcraft-project = { workspace = true }
+effectcraft-time = { workspace = true }
+image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -25,3 +30,4 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 
 [dev-dependencies]
 effectcraft-host = { workspace = true }
+effectcraft-psd = { workspace = true }

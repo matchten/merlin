@@ -4,7 +4,7 @@
 
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
-use effectcraft_ui_egui::panels::merlin::{ChatItem, Decision, ToolState};
+use effectcraft_ui_egui::panels::merlin::{AttachState, ChatItem, Decision, ToolState};
 use egui_kittest::Harness;
 
 fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
@@ -60,7 +60,7 @@ fn merlin_runs_a_demo_turn_and_reverts_it() {
     // The demo built its comp through the UI thread, live, and looked at three frames.
     assert!(has_comp(&h, "Merlin Demo"));
     let items = h.state().ui.merlin.items.clone();
-    assert!(matches!(&items[0], ChatItem::User { text } if text == "Hello Merlin"));
+    assert!(matches!(&items[0], ChatItem::User { text, .. } if text == "Hello Merlin"));
     let tools: Vec<(&str, ToolState, usize)> =
         items.iter().filter_map(|i| if let ChatItem::Tool { name, state, frames, .. } = i { Some((name.as_str(), *state, *frames)) } else { None }).collect();
     assert_eq!(tools, vec![("run_script", ToolState::Done, 0), ("render_frames", ToolState::Done, 3)], "{items:#?}");
@@ -159,6 +159,168 @@ fn merlin_settings_switch_providers() {
     assert!(!h.state().ui.merlin.settings_open);
 }
 
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("merlin-ui-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Step until no attachment is still loading (they decode on another thread).
+fn wait_attached(h: &mut Harness<'_, EffectcraftApp>) {
+    for _ in 0..2000 {
+        h.run_steps(1);
+        if !h.state().ui.merlin.attachments.iter().any(|a| a.state == AttachState::Loading) {
+            h.run_steps(1);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("attachments didn't load: {:#?}", h.state().ui.merlin.attachments);
+}
+
+#[test]
+fn merlin_sends_attached_images_with_the_message() {
+    let mut h = harness();
+    h.state_mut().ui.merlin.settings.provider = "demo".into();
+    assert!(h.state().auto.find("merlin.attach").is_some());
+    let d = temp_dir("send");
+    let png = d.join("moodboard.png");
+    image::RgbaImage::from_pixel(64, 36, image::Rgba([20, 40, 200, 255])).save(&png).unwrap();
+    let svg = d.join("logo.svg");
+    std::fs::write(&svg, r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><circle cx="20" cy="20" r="18" fill="#fff"/></svg>"##).unwrap();
+    let junk = d.join("broken.png");
+    std::fs::write(&junk, b"not a picture").unwrap();
+    let ctx = h.ctx.clone();
+    let paths: Vec<String> = [&png, &svg, &junk].iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    effectcraft_ui_egui::panels::merlin::attach_paths(h.state_mut(), &ctx, paths.clone());
+    // The same file twice is attached once.
+    effectcraft_ui_egui::panels::merlin::attach_paths(h.state_mut(), &ctx, vec![paths[0].clone()]);
+    wait_attached(&mut h);
+    let chips = h.state().ui.merlin.attachments.clone();
+    assert_eq!(chips.len(), 3, "{chips:#?}");
+    assert_eq!((chips[0].state, chips[1].state, chips[2].state), (AttachState::Ready, AttachState::Ready, AttachState::Failed), "{chips:#?}");
+    assert!(chips[0].info.contains("64×36"), "{chips:#?}");
+    assert!(!chips[2].info.is_empty());
+    for id in ["merlin.attach.0", "merlin.attach.1", "merlin.attach.2.remove"] {
+        assert!(h.state().auto.find(id).is_some(), "missing {id}");
+    }
+    // The broken file can be removed; pictures alone are a message.
+    click(&mut h, "merlin.attach.2.remove");
+    assert_eq!(h.state().ui.merlin.attachments.len(), 2);
+    h.run_steps(2); // the footer shrinks to the remaining row of chips
+    click(&mut h, "merlin.send");
+    assert!(h.state().ui.merlin.attachments.is_empty(), "sent with the message");
+    wait_idle(&mut h);
+    let items = h.state().ui.merlin.items.clone();
+    let Some(ChatItem::User { text, attachments }) = items.first() else { panic!("{items:#?}") };
+    assert!(text.is_empty());
+    assert_eq!(attachments, &paths[..2]);
+    assert!(
+        items.iter().any(|i| matches!(i, ChatItem::Assistant { text } if text.contains("I can see 2 attached image(s): moodboard.png, logo.svg"))),
+        "the model got both pictures: {items:#?}"
+    );
+    assert!(matches!(items.last(), Some(ChatItem::Turn { label, .. }) if label == "Merlin: moodboard.png, logo.svg"), "{items:#?}");
+}
+
+#[test]
+fn files_dropped_on_merlin_attach_and_elsewhere_import() {
+    let mut h = harness();
+    let d = temp_dir("drop");
+    let png = d.join("ref.png");
+    image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 0, 0, 255])).save(&png).unwrap();
+    let log = h.state().auto.find("merlin.log").unwrap().clone();
+    let over = egui::pos2(log.rect[0] + log.rect[2] / 2.0, log.rect[1] + log.rect[3] / 2.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(over));
+    h.run_steps(1);
+
+    // Hovering shows Merlin's own hint, not the import one.
+    h.input_mut().hovered_files.push(egui::HoveredFile { path: Some(png.clone()), mime: String::new() });
+    h.run_steps(2);
+    assert!(h.state().auto.find("merlin.dropTarget").is_some());
+    assert!(h.state().auto.find("file.dropTarget").is_none());
+    h.input_mut().hovered_files.clear();
+
+    let items_before = h.state().session.project.items.len();
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(png.clone())));
+    h.run_steps(2);
+    wait_attached(&mut h);
+    let chips = &h.state().ui.merlin.attachments;
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].state, AttachState::Ready);
+    assert_eq!(h.state().session.project.items.len(), items_before, "not imported");
+
+    // Over another panel the drop imports as before.
+    let timeline = h.state().auto.find("panel.Timeline").unwrap().clone();
+    let elsewhere = egui::pos2(timeline.rect[0] + timeline.rect[2] / 2.0, timeline.rect[1] + timeline.rect[3] / 2.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(elsewhere));
+    h.run_steps(1);
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(png.clone())));
+    h.run_steps(2);
+    for _ in 0..1000 {
+        if h.state().session.project.items.len() > items_before {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run_steps(1);
+    }
+    assert!(h.state().session.project.items.values().any(|i| i.name == "ref.png"), "imported");
+    assert_eq!(h.state().ui.merlin.attachments.len(), 1, "and not attached again");
+}
+
+/// Agents can't drag files: `ui.set {"merlin": {"attach": [...]}}` attaches them instead.
+#[test]
+fn the_control_channel_attaches_files() {
+    let mut h = harness();
+    let d = temp_dir("control");
+    let png = d.join("still.png");
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255])).save(&png).unwrap();
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"attach": ["relative.png"]})).unwrap_err().contains("absolute"));
+    assert!(set(h.state_mut(), &ctx, &serde_json::json!({"attach": "x"})).is_err());
+    set(h.state_mut(), &ctx, &serde_json::json!({"attach": [png.to_string_lossy()]})).unwrap();
+    wait_attached(&mut h);
+    assert_eq!(h.state().ui.merlin.attachments.len(), 1);
+    assert_eq!(h.state().ui.merlin.attachments[0].state, AttachState::Ready);
+}
+
+/// A floating window showing Merlin keeps the files dropped on it; other windows' go to import.
+#[test]
+fn files_dropped_on_a_floating_merlin_window_attach() {
+    let mut h = harness();
+    let d = temp_dir("window");
+    let png = d.join("frame.png");
+    image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 255, 0, 255])).save(&png).unwrap();
+    let window = |panel: PanelKind| craft_ui::docking::WindowFiles {
+        window: 1,
+        viewport: egui::ViewportId::ROOT,
+        panel,
+        pos: None,
+        hovered: vec![],
+        dropped: vec![std::sync::Arc::new(Dropped(png.clone())) as egui::DroppedFileHandle],
+    };
+    let ctx = h.ctx.clone();
+    let rest = effectcraft_ui_egui::panels::merlin::take_window_files(h.state_mut(), &ctx, vec![window(PanelKind::Merlin), window(PanelKind::Timeline)]);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].panel, PanelKind::Timeline);
+    wait_attached(&mut h);
+    assert_eq!(h.state().ui.merlin.attachments.len(), 1);
+    assert_eq!(h.state().ui.merlin.attachments[0].state, AttachState::Ready);
+}
+
+/// A file dropped on the window (egui hands it over as a dropped file).
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Err("not read".into())
+    }
+}
+
 /// Headless look at the panel after a demo turn (wgpu offscreen); run with
 /// `MERLIN_SNAPSHOT=/abs/out.png cargo test -p effectcraft-ui-egui --test it ui_merlin::merlin_snapshot -- --ignored`.
 #[test]
@@ -166,13 +328,29 @@ fn merlin_settings_switch_providers() {
 fn merlin_snapshot() {
     let mut h = harness();
     h.state_mut().ui.merlin.settings.provider = "demo".into();
-    h.state_mut().ui.merlin.input = "A title that says MERLIN".into();
-    h.run_steps(1);
+    let d = temp_dir("snapshot");
+    let board = d.join("moodboard.png");
+    let mut img = image::RgbaImage::new(160, 90);
+    for (x, _, p) in img.enumerate_pixels_mut() {
+        *p = image::Rgba([(x * 255 / 160) as u8, 40, 160, 255]);
+    }
+    img.save(&board).unwrap();
+    let logo = d.join("studio-logo.svg");
+    std::fs::write(&logo, r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><circle cx="30" cy="30" r="26" fill="#f5c542"/></svg>"##).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::attach_paths(h.state_mut(), &ctx, vec![board.to_string_lossy().into_owned()]);
+    wait_attached(&mut h);
+    h.state_mut().ui.merlin.input = "A title that says MERLIN in these colours".into();
+    h.run_steps(2);
     click(&mut h, "merlin.send");
     wait_idle(&mut h);
     let tool = h.state().ui.merlin.items.iter().position(|i| matches!(i, ChatItem::Tool { .. })).unwrap();
     click(&mut h, &format!("merlin.item.{tool}.toggle"));
-    h.state_mut().ui.merlin.input = "Make it glow".into();
+    let junk = d.join("notes.png");
+    std::fs::write(&junk, b"nope").unwrap();
+    effectcraft_ui_egui::panels::merlin::attach_paths(h.state_mut(), &ctx, vec![logo.to_string_lossy().into_owned(), junk.to_string_lossy().into_owned()]);
+    wait_attached(&mut h);
+    h.state_mut().ui.merlin.input = "Add the logo bottom right".into();
     h.run_steps(4);
     let img = h.render().expect("render");
     let out = std::env::var("MERLIN_SNAPSHOT").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin.png").into());

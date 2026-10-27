@@ -13,7 +13,7 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use native::Runtime;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{show, tick};
+pub use native::{apply_ui_set, attach_paths, show, take_main_window_files, take_window_files, tick};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -26,6 +26,8 @@ pub struct MerlinPanel {
     pub settings_open: bool,
     /// Provider and model (no secrets: keys live in the OS keychain).
     pub settings: MerlinSettings,
+    /// Files attached to the next message.
+    pub attachments: Vec<Attached>,
     /// A turn is running.
     pub busy: bool,
     #[serde(skip)]
@@ -44,6 +46,26 @@ pub struct MerlinSettings {
     pub base_url: String,
     /// Anthropic effort: `low` … `max`; empty means `high`.
     pub effort: String,
+}
+
+/// A file attached to the message being written (decoded off the UI thread).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attached {
+    pub path: String,
+    /// The file name.
+    pub name: String,
+    pub state: AttachState,
+    /// `PSD · 1200×800` once decoded, or why it can't be attached.
+    pub info: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttachState {
+    Loading,
+    Ready,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +95,9 @@ pub enum Decision {
 pub enum ChatItem {
     User {
         text: String,
+        /// Paths of the files sent with it (thumbnails are kept by the runtime).
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     Assistant {
         text: String,
@@ -133,3 +158,18 @@ pub fn show(app: &mut crate::EffectcraftApp, ui: &mut egui::Ui, rect: egui::Rect
 
 #[cfg(target_arch = "wasm32")]
 pub fn tick(_: &mut crate::EffectcraftApp, _: &egui::Context, _: f64) {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn apply_ui_set(_: &mut crate::EffectcraftApp, _: &egui::Context, _: &serde_json::Value) -> Result<(), String> {
+    Err("Merlin runs in the desktop app".into())
+}
+
+/// The web build has no agent: floating windows' files all go to import.
+#[cfg(target_arch = "wasm32")]
+pub fn take_window_files<P>(
+    _: &mut crate::EffectcraftApp,
+    _: &egui::Context,
+    files: Vec<craft_ui::docking::WindowFiles<P>>,
+) -> Vec<craft_ui::docking::WindowFiles<P>> {
+    files
+}
