@@ -1,6 +1,6 @@
 {
-  "name": "EffectCraft",
-  "short_name": "EffectCraft",
+  "name": "Merlin",
+  "short_name": "Merlin",
   "description": "Motion graphics and visual effects compositor, in the browser",
   "id": "./",
   "start_url": "./",

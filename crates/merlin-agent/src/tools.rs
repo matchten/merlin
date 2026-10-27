@@ -80,7 +80,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "execute_command",
-            description: "Run any EffectCraft engine command by id with JSON params (layer.newText, comp.new, effect.apply, keys.easyEase, layer.timing, prop.set…). Unknown params are rejected with the accepted list. Use list_commands / describe_command to discover ids and params.",
+            description: "Run any Merlin engine command by id with JSON params (layer.newText, comp.new, effect.apply, keys.easyEase, layer.timing, prop.set…). Unknown params are rejected with the accepted list. Use list_commands / describe_command to discover ids and params.",
             input_schema: schema(
                 json!({"command": {"type": "string", "description": "Command id, e.g. `layer.newShape`."}, "params": {"type": "object", "description": "Command parameters."}}),
                 &["command"],

@@ -1293,7 +1293,7 @@ fn project_files_keep_their_format_warn_about_newer_versions_and_never_save_unre
     let junk = tmp("Junk.ecproj");
     std::fs::write(&junk, "{ not json").unwrap();
     let e = s.execute("file.open", json!({"path": junk})).unwrap_err().to_string();
-    assert!(e.contains("is not a project EffectCraft can open"), "{e}");
+    assert!(e.contains("is not a project Merlin can open"), "{e}");
 }
 
 #[test]

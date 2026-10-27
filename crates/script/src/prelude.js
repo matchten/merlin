@@ -166,7 +166,7 @@ function BridgeTalk() {
   this.onTimeout = null;
 }
 BridgeTalk.prototype.send = function () {
-  throw __err("BridgeTalk: sending messages to other applications is not supported in EffectCraft");
+  throw __err("BridgeTalk: sending messages to other applications is not supported in Merlin");
 };
 BridgeTalk.prototype.sendResult = BridgeTalk.prototype.send;
 BridgeTalk.prototype.toString = function () { return "[object BridgeTalk]"; };

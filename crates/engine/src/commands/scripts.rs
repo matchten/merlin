@@ -370,7 +370,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Restore ScriptUI Panels",
             [],
             None,
-            "{} → reopens the ScriptUI panels open when EffectCraft last quit (frontends call it at launch) → {opened: [name], failed: [{name, error}]}",
+            "{} → reopens the ScriptUI panels open when Merlin last quit (frontends call it at launch) → {opened: [name], failed: [{name, error}]}",
             always,
             restore_panels
         ),

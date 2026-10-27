@@ -291,7 +291,7 @@ fn extract_face(s: &mut Session, p: &Value) -> Result<Value> {
     s.state.key_clipboard = clip;
     s.state.clip_is_keys = true;
     // The same data as text (tab-separated, one row per frame) for other applications.
-    let mut text = String::from("EffectCraft Face Measurements\n\nFrame\tTime");
+    let mut text = String::from("Merlin Face Measurements\n\nFrame\tTime");
     for (_, name) in MEASUREMENTS {
         text.push('\t');
         text.push_str(name);

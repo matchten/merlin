@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Install-test the EffectCraft MSI's folder handling with stub binaries (no Rust build).
+  Install-test the Merlin MSI's folder handling with stub binaries (no Rust build).
 
 .DESCRIPTION
   Builds the MSI around two stand-in executables as 0.0.1 the way releases before this installer
@@ -27,7 +27,7 @@ trap { Write-Output "FAILED: $_"; exit 1 }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $AppPaths = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe'
 # A per-machine install's desktop is the Public one.
-$DesktopLink = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'EffectCraft.lnk'
+$DesktopLink = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'Merlin.lnk'
 
 function Invoke-Native([string] $What, [scriptblock] $Block) {
   Write-Output "==> $What"
@@ -89,9 +89,9 @@ foreach ($v in '0.0.1', '0.0.2', '0.0.3') {
 }
 
 # Spaces and a non-ASCII letter (written as a char so the script's own encoding doesn't matter).
-$Custom = Join-Path $env:SystemDrive "EffectCraft Test $([char]0x00DC)nicode\My Apps"
-$Default = Join-Path $env:ProgramFiles 'EffectCraft'
-if (Test-Path -LiteralPath $AppPaths) { throw 'EffectCraft is already installed here; run this on a clean machine' }
+$Custom = Join-Path $env:SystemDrive "Merlin Test $([char]0x00DC)nicode\My Apps"
+$Default = Join-Path $env:ProgramFiles 'Merlin'
+if (Test-Path -LiteralPath $AppPaths) { throw 'Merlin is already installed here; run this on a clean machine' }
 
 Invoke-Msiexec 'install the legacy package to a custom folder' @('/i', "`"$($Msi['0.0.1'])`"", "INSTALLFOLDER=`"$Custom`"")
 Assert-InstalledIn $Custom -NoPathValue
@@ -107,8 +107,8 @@ Assert-InstalledIn $Custom
 Assert-DesktopShortcut $true
 # Read single values: Get-ItemProperty throws on some machines' malformed Uninstall entries.
 $arp = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft') { $_.GetValue('DisplayVersion') } })
-if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one EffectCraft 0.0.3 in Apps, found: $($arp -join ', ')" }
+  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'Merlin') { $_.GetValue('DisplayVersion') } })
+if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one Merlin 0.0.3 in Apps, found: $($arp -join ', ')" }
 
 # Repair the way the wizard's Repair button does: damage the CLI in place (a later write time, as a
 # user edit or corruption would have), repair with the wizard's REINSTALLMODE, compare contents.

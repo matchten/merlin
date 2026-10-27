@@ -62,7 +62,7 @@ impl Launch {
                 Err(e) => log::warn!("the last launch stopped as its window opened; saving Window Graphics failed: {e}"),
             }
             notice = Some(
-                "EffectCraft's last launch stopped as its window opened, so it now draws with OpenGL \
+                "Merlin's last launch stopped as its window opened, so it now draws with OpenGL \
                  (Settings ▸ Startup & Repair ▸ Window Graphics). Updating the graphics driver may let it use \
                  Automatic again."
                     .to_string(),

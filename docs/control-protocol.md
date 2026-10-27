@@ -237,7 +237,7 @@ group's drag bar), `panel.tabs.more.<Panel>`, `panel.menu.<Panel>` (≡), `panel
 
 Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
 closed panels with where each goes back, the lock, and each floating window's desktop place. A
-version 1 file (EffectCraft 0.10 and earlier) and the older unversioned record of
+version 1 file (Merlin 0.10 and earlier) and the older unversioned record of
 named workspaces load with every panel in place: the current layout, the named workspaces,
 floating windows and their native window places. A column of stacked frames becomes tab groups
 split top to bottom: each open frame keeps all its tabs and its height (as a fixed size), and a

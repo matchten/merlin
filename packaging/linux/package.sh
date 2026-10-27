@@ -44,7 +44,7 @@ esac
 export EFFECTCRAFT_MAINTAINER="${EFFECTCRAFT_MAINTAINER:-EffectCraft maintainers <effectcraft@storyteller.ai>}"
 BASENAME="effectcraft-$VERSION-linux-$ARCH"
 
-echo "==> EffectCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> Merlin $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
@@ -128,7 +128,7 @@ if has appimage; then
     echo "no pinned AppImage runtime for $ARCH; build the AppImage on x86_64 or aarch64" >&2
     exit 2
   fi
-  APPDIR="$WORK/EffectCraft.AppDir"
+  APPDIR="$WORK/Merlin.AppDir"
   cp -R "$STAGE" "$APPDIR"
   ln -s usr/bin/effectcraft "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"

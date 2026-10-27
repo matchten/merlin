@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-cli"
-description = "EffectCraft headless CLI: render frames and sequences, run commands, MCP server"
+description = "Merlin headless CLI: render frames and sequences, run commands, MCP server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

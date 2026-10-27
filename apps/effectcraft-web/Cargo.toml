@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-web"
-description = "EffectCraft in the browser (wasm32): eframe web runner, persistent browser storage (OPFS / IndexedDB), Web Audio, Web Worker renders, PWA, window.effectcraft API"
+description = "Merlin in the browser (wasm32): eframe web runner, persistent browser storage (OPFS / IndexedDB), Web Audio, Web Worker renders, PWA, window.effectcraft API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

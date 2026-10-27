@@ -71,7 +71,7 @@ pub fn project_name(app: &EffectcraftApp) -> String {
 /// The window title: the project's path (or name) and `*` while it has unsaved changes.
 pub fn window_title(app: &EffectcraftApp) -> String {
     let doc = app.session.path.clone().unwrap_or_else(|| project_name(app));
-    format!("EffectCraft - {doc}{}", if app.session.is_dirty() { " *" } else { "" })
+    format!("Merlin - {doc}{}", if app.session.is_dirty() { " *" } else { "" })
 }
 
 /// Whether the prompt is Revert Project (Revert / Cancel) instead of Unsaved Changes.

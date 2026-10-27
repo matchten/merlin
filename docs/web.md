@@ -1,4 +1,4 @@
-# EffectCraft on the web
+# Merlin on the web
 
 `apps/effectcraft-web` runs the same engine and egui UI as the desktop app in the browser: the
 workspace compiled to `wasm32-unknown-unknown`, started by eframe's web runner on WebGPU (WebGL2

@@ -18,7 +18,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     p.text(
         pos2(x, y + 26.0),
         Align2::LEFT_CENTER,
-        "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+        "Hands-on tutorials that run inside Merlin. Do each step yourself, or press Show me.",
         Tokens::ui(11.5),
         t.text_faint,
     );

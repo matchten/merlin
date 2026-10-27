@@ -88,6 +88,6 @@ fn run() -> Result<(), String> {
     host.command("file.saveAs", serde_json::json!({"path": path.to_string_lossy()}))?;
     let conv = serde_json::to_string_pretty(&conversation).map_err(|e| e.to_string())?;
     std::fs::write(out.join("conversation.json"), conv).map_err(|e| e.to_string())?;
-    eprintln!("saved {} (open it in EffectCraft) and {frame_n} frame(s)", path.display());
+    eprintln!("saved {} (open it in Merlin) and {frame_n} frame(s)", path.display());
     Ok(())
 }

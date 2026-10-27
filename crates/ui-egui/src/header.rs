@@ -31,9 +31,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let brand = Rect::from_min_size(pos2(x, cy - 12.0), vec2(24.0, 24.0));
     paint_logo(&p, brand);
     let bresp = ui.interact(brand, egui::Id::unique("brand"), Sense::click());
-    app.auto.add_response("header.about", &bresp, "About EffectCraft");
+    app.auto.add_response("header.about", &bresp, "About Merlin");
     widgets::focus_outline(ui, &bresp, &t);
-    if bresp.on_hover_text(tr("About EffectCraft")).clicked() {
+    if bresp.on_hover_text(tr("About Merlin")).clicked() {
         app.dialog = Some(Dialog::About);
     }
     x += 32.0;

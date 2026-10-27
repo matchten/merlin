@@ -10,7 +10,7 @@ use crate::{Result, Session, cmd};
 
 /// Why the entry is disabled (shown as its tooltip).
 pub const WHY: &str =
-    "Vanishing Point Exchange (.vpe) files can't be imported: the format has no public specification, and EffectCraft only implements documented formats";
+    "Vanishing Point Exchange (.vpe) files can't be imported: the format has no public specification, and Merlin only implements documented formats";
 
 fn import(_: &mut Session, _: &Value) -> Result<Value> {
     Err(bad("file.importVanishingPoint", WHY))

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  EffectCraft installer wizard: original dialogs built from Windows Installer's own controls and
+  Merlin installer wizard: original dialogs built from Windows Installer's own controls and
   events (no WixUI library), included by effectcraft.wxs with <UIRef Id="EffectcraftUI" />.
 
     fresh install:  DestDlg (folder, Change... opens BrowseDlg, desktop shortcut) -> ReadyDlg -> ProgressDlg -> ExitDlg

@@ -344,7 +344,7 @@ impl<'a> Cx<'a> {
         let comp = self.comp();
         let path = log_path(self.job.path);
         let mut s = String::new();
-        s.push_str("EffectCraft Render Log\n");
+        s.push_str("Merlin Render Log\n");
         s.push_str(&format!("Item: {}\n", if self.job.options.label.is_empty() { "(render)" } else { &self.job.options.label }));
         s.push_str(&format!("Output: {}\n", self.job.path));
         match result {

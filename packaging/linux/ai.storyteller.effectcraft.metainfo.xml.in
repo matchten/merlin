@@ -5,14 +5,14 @@
   <id>ai.storyteller.effectcraft</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
-  <name>EffectCraft</name>
+  <name>Merlin</name>
   <summary>Motion graphics and visual effects compositor</summary>
   <developer id="ai.storyteller">
     <name>Learning Machines LLC</name>
   </developer>
   <description>
     <p>
-      EffectCraft is an open-source motion graphics and visual effects compositor: layers with
+      Merlin is an open-source motion graphics and visual effects compositor: layers with
       keyframes and a graph editor, masks and shapes, text animators, expressions, 3D cameras and
       lights, over 300 effects and a render queue, with GPU compositing.
     </p>

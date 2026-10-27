@@ -1,6 +1,6 @@
-# Driving EffectCraft from agents
+# Driving Merlin from agents
 
-Everything in EffectCraft is an engine command with a stable id and JSON params. Menus, shortcuts,
+Everything in Merlin is an engine command with a stable id and JSON params. Menus, shortcuts,
 panel gestures, the CLI, the control channel and MCP all go through the same commands, so anything a
 user can do, an agent can do too. There are three ways in:
 
@@ -54,13 +54,13 @@ The release packages ship `effectcraft-cli` alongside the desktop app, so no bui
 
 | Install | CLI |
 |---|---|
-| Windows (MSI) | `C:\Program Files\EffectCraft\effectcraft-cli.exe` by default (wherever you installed it otherwise), not on `PATH` |
+| Windows (MSI) | `C:\Program Files\Merlin\effectcraft-cli.exe` by default (wherever you installed it otherwise), not on `PATH` |
 | Linux (deb, rpm) | `/usr/bin/effectcraft-cli` |
 | macOS | the separate `effectcraft-cli-<version>-macos-<arch>.zip` release asset (the `.app` holds only the desktop app) |
 
 ```sh
 # Windows, default install folder
-claude mcp add effectcraft -- "C:\Program Files\EffectCraft\effectcraft-cli.exe" mcp
+claude mcp add effectcraft -- "C:\Program Files\Merlin\effectcraft-cli.exe" mcp
 # Linux, or macOS with the CLI unzipped onto PATH
 claude mcp add effectcraft -- effectcraft-cli mcp
 ```

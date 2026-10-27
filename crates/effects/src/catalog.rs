@@ -131,7 +131,7 @@ pub fn effects_markdown() -> String {
     let float = r.iter().filter(|e| e.float).count();
     let partial = r.iter().filter(|e| PARTIAL.iter().any(|(id, _)| *id == e.id)).count();
     s.push_str(&format!(
-        "EffectCraft ships {} effects with {} parameters in total, grouped into the same categories as the Effects & Presets \
+        "Merlin ships {} effects with {} parameters in total, grouped into the same categories as the Effects & Presets \
          panel. Every effect is our own implementation, written from public behaviour descriptions and standard \
          image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the \
          reference application so that projects, expressions and muscle memory carry over.\n\n",

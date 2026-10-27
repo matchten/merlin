@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft"
-description = "EffectCraft desktop app"
+description = "Merlin desktop app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

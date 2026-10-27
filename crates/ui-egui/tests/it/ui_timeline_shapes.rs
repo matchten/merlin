@@ -199,7 +199,7 @@ fn ctrl_c_and_ctrl_v_copy_a_shape_group_into_another_shape_layer() {
     h.step();
     click(&mut h, &format!("timeline.layer.{b}.row"));
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(b)]);
-    h.input_mut().events.push(Event::Paste("EffectCraft: 1 shape item".into()));
+    h.input_mut().events.push(Event::Paste("Merlin: 1 shape item".into()));
     h.run_steps(3);
     assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 2, "no new layer");
     assert_eq!(contents_names(&h, b), ["Rectangle 1", "Ellipse 1"]);
@@ -300,7 +300,7 @@ fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
     assert_eq!(top.props.sub("contents").unwrap().groups().count(), 2);
     assert_eq!(h.state().session.state.selected_layers, vec![top.id]);
     // The app's own clipboard note pastes the copied layer as before.
-    h.input_mut().events.push(Event::Paste("EffectCraft: 1 layer".into()));
+    h.input_mut().events.push(Event::Paste("Merlin: 1 layer".into()));
     h.run_steps(3);
     let c = h.state().session.active_comp().unwrap();
     assert_eq!(c.layers.len(), 4);

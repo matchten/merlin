@@ -39,7 +39,7 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
-APP="$WORK/EffectCraft.app"
+APP="$WORK/Merlin.app"
 DMG="$DIST/effectcraft-$VERSION-macos-$ARCH.dmg"
 CLI_ZIP="$DIST/effectcraft-cli-$VERSION-macos-$ARCH.zip"
 
@@ -52,7 +52,7 @@ else
   warn "macOS: APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID incomplete; signed but not notarized"
 fi
 
-echo "==> EffectCraft $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
+echo "==> Merlin $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
 
 # ---- build -------------------------------------------------------------------------------------
 if [[ "$SKIP_BUILD" = 0 ]]; then
@@ -101,8 +101,8 @@ notarize() {
 echo "==> assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Executable and icon carry the display name (CFBundleExecutable / CFBundleIconFile).
-cp "$WORK/bin/effectcraft" "$APP/Contents/MacOS/EffectCraft"
-cp "$ROOT/assets/app-icon/effectcraft.icns" "$APP/Contents/Resources/EffectCraft.icns"
+cp "$WORK/bin/effectcraft" "$APP/Contents/MacOS/Merlin"
+cp "$ROOT/assets/app-icon/effectcraft.icns" "$APP/Contents/Resources/Merlin.icns"
 # Required embedded-font notices are independent of optional font inputs.
 cp "$ROOT/NOTICE" "$APP/Contents/Resources/NOTICE"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
@@ -113,13 +113,13 @@ printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 # Sign inside-out: nested code first, then the bundle itself (no --deep on the final signature).
 # Today the only nested code is the main executable; frameworks/helpers would be signed here too.
-sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/EffectCraft"
+sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/Merlin"
 sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
 if [[ "$NOTARIZE" = 1 ]]; then
-  ditto -c -k --keepParent "$APP" "$WORK/EffectCraft-notarize.zip"
-  notarize "$WORK/EffectCraft-notarize.zip"
+  ditto -c -k --keepParent "$APP" "$WORK/Merlin-notarize.zip"
+  notarize "$WORK/Merlin-notarize.zip"
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute -vvv "$APP"
@@ -129,7 +129,7 @@ fi
 echo "==> building $DMG"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
-ditto "$APP" "$STAGE/EffectCraft.app"
+ditto "$APP" "$STAGE/Merlin.app"
 ln -s /Applications "$STAGE/Applications"
 # Finder window layout: background, icon size and positions (packaging/macos/dmg/README.md).
 # The background is rendered from its SVG (1x + 2x in one HiDPI TIFF), so no bitmap is committed.
@@ -167,7 +167,7 @@ hdiutil_retry() {
     sleep $((attempt * 10))
   done
 }
-hdiutil_retry create create -srcfolder "$STAGE" -volname "EffectCraft" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
+hdiutil_retry create create -srcfolder "$STAGE" -volname "Merlin" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
 sign "$DMG"
 codesign --verify --strict --verbose=2 "$DMG"
 # The app inside the image must still pass --strict, so a makehybrid-style regression can't ship.
@@ -175,7 +175,7 @@ MOUNT="$WORK/dmg-check"
 rm -rf "$MOUNT"
 mkdir -p "$MOUNT"
 hdiutil_retry attach attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG" >/dev/null
-if ! codesign --verify --strict --deep --verbose=2 "$MOUNT/EffectCraft.app"; then
+if ! codesign --verify --strict --deep --verbose=2 "$MOUNT/Merlin.app"; then
   hdiutil_retry detach detach "$MOUNT" >/dev/null || true
   exit 1
 fi

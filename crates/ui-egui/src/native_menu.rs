@@ -537,7 +537,7 @@ mod tests {
         }
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
-        assert_eq!(translated, ["Служби", "Приховати EffectCraft", "Приховати решту", "Показати все"]);
+        assert_eq!(translated, ["Служби", "Приховати Merlin", "Приховати решту", "Показати все"]);
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod tests {
         }
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
-        assert_eq!(translated, ["Služby", "Skrýt EffectCraft", "Skrýt ostatní", "Zobrazit vše"]);
+        assert_eq!(translated, ["Služby", "Skrýt Merlin", "Skrýt ostatní", "Zobrazit vše"]);
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         }
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
-        assert_eq!(translated, ["სერვისები", "EffectCraft-ის დამალვა", "სხვების დამალვა", "ყველას ჩვენება"]);
+        assert_eq!(translated, ["სერვისები", "Merlin-ის დამალვა", "სხვების დამალვა", "ყველას ჩვენება"]);
     }
 
     #[test]

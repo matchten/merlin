@@ -98,7 +98,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         _ => return Err(bad("anim.applyPreset", "missing `path` (or inline `preset`)")),
     };
     if doc.get(PRESET_TAG).is_none() {
-        return Err(bad("anim.applyPreset", "not an EffectCraft animation preset"));
+        return Err(bad("anim.applyPreset", "not a Merlin animation preset"));
     }
     let (cid, ids) = layers_p(s, p)?;
     if ids.is_empty() {

@@ -9,14 +9,19 @@
 
 
 <p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="EffectCraft icon: an engraved unicorn on a pink tile">
+  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="Merlin icon: an engraved unicorn on a pink tile">
 </p>
 
-<h1 align="center">EffectCraft</h1>
+<h1 align="center">Merlin</h1>
 
 <p align="center">
-  <b>Motion graphics and visual effects; an open-source, professional motion graphics and visual effects studio, built in pure Rust.</b>
+  <b>An AI agent for motion graphics, built into an open-source After Effects-class compositor written in pure Rust.</b>
 </p>
+
+> [!NOTE]
+> **Merlin is a fork of [EffectCraft](https://github.com/storytold/effectcraft).** It adds Merlin,
+> an in-app agent (**Window ▸ Merlin**) that builds and edits compositions through the app's own
+> commands. The rest of this README describes the EffectCraft compositor Merlin is built on.
 
 <p align="center">
   A free, open-source compositor: compositions, layers,

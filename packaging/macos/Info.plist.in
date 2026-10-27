@@ -7,11 +7,11 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>EffectCraft</string>
+  <string>Merlin</string>
   <key>CFBundleName</key>
-  <string>EffectCraft</string>
+  <string>Merlin</string>
   <key>CFBundleExecutable</key>
-  <string>EffectCraft</string>
+  <string>Merlin</string>
   <key>CFBundleIdentifier</key>
   <string>ai.storyteller.effectcraft</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -29,7 +29,7 @@
   <key>EffectCraftBuildCommit</key>
   <string>@BUILD_SHA@</string>
   <key>CFBundleIconFile</key>
-  <string>EffectCraft</string>
+  <string>Merlin</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.graphics-design</string>
   <!-- Must match MACOSX_DEPLOYMENT_TARGET in package.sh. Big Sur is the first release on
@@ -50,13 +50,13 @@
   <array>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>EffectCraft Project</string>
+      <string>Merlin Project</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
       <string>Owner</string>
       <key>CFBundleTypeIconFile</key>
-      <string>EffectCraft</string>
+      <string>Merlin</string>
       <key>LSItemContentTypes</key>
       <array><string>ai.storyteller.effectcraft.document</string></array>
     </dict>
@@ -68,14 +68,14 @@
       <key>UTTypeIdentifier</key>
       <string>ai.storyteller.effectcraft.document</string>
       <key>UTTypeDescription</key>
-      <string>EffectCraft Project</string>
+      <string>Merlin Project</string>
       <key>UTTypeConformsTo</key>
       <array>
         <string>public.data</string>
         <string>public.content</string>
       </array>
       <key>UTTypeIconFile</key>
-      <string>EffectCraft</string>
+      <string>Merlin</string>
       <key>UTTypeTagSpecification</key>
       <dict>
         <key>public.filename-extension</key>

@@ -13,7 +13,7 @@ fn all_ui_review_captures() {
     for (label, size) in [("wide", egui::vec2(1600.0, 1000.0)), ("compact", egui::vec2(1024.0, 768.0))] {
         let mut s = Session::default();
         s.execute("comp.new", json!({"name":"UI Review","width":640,"height":360,"duration":4})).unwrap();
-        s.execute("layer.newText", json!({"text":"EffectCraft","name":"Title"})).unwrap();
+        s.execute("layer.newText", json!({"text":"Merlin","name":"Title"})).unwrap();
         s.execute("layer.newSolid", json!({"name":"Plate","color":"#406080","width":160,"height":120})).unwrap();
         s.execute("renderQueue.add", json!({"format":"png","output":"review-[#####].png"})).unwrap();
         std::sync::Arc::make_mut(&mut s.project).settings.gpu_acceleration = false;

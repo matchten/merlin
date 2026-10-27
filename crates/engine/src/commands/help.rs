@@ -30,7 +30,7 @@ fn docs(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("help.docs", "EffectCraft Help...", [], Some("F1"), "{page?: help|scripting|expressions|effects|agents}", always, docs),
+        cmd!("help.docs", "Merlin Help...", [], Some("F1"), "{page?: help|scripting|expressions|effects|agents}", always, docs),
         cmd!("help.discord", "Join the ArtCraft Discord...", ["Help"], None, "{}", always, |s, _| open(s, links::DISCORD.into())),
         cmd!("help.website", "ArtCraft Website", ["Help"], None, "{}", always, |s, _| open(s, links::WEBSITE.into())),
         cmd!("help.appPage", "EffectCraft Home Page", ["Help"], None, "{}", always, |s, _| open(s, links::APP_PAGE.into())),

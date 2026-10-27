@@ -1,7 +1,7 @@
 # Plug-ins and extensions
 
-EffectCraft's core aims at After Effects parity. What After Effects users get from third parties
-(effect plug-ins, scripts, ScriptUI panels) is an extension in EffectCraft too, and EffectCraft
+Merlin's core aims at After Effects parity. What After Effects users get from third parties
+(effect plug-ins, scripts, ScriptUI panels) is an extension in Merlin too, and Merlin
 offers the same kinds of extension points as After Effects so that anyone can write their own.
 
 ## Extension points compared with After Effects
@@ -9,7 +9,7 @@ offers the same kinds of extension points as After Effects so that anyone can wr
 From After Effects' public documentation (the user guide's scripting pages and the Scripting
 Guide):
 
-| After Effects | EffectCraft | |
+| After Effects | Merlin | |
 |---|---|---|
 | Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (plug-in API v1) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
 | Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples | Same |
@@ -47,7 +47,7 @@ A ScriptUI panel is a script that builds its user interface into the panel it is
 Put it in `Scripts/ScriptUI Panels/` in the settings folder (or use File ▸ Scripts ▸ Install
 ScriptUI Panel…) and it is listed at the bottom of the Window menu under its file name; choosing it
 runs the script and docks its panel as a tab, which you can move, float, maximize and close like any
-other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when EffectCraft
+other panel. Closing the tab closes the panel (its `onClose` runs). Panels open when Merlin
 quits open again at the next launch (`window.restoreScriptPanels`, which the desktop and web apps
 run at start-up; the list is `scriptui_panels.json` in the settings folder).
 
@@ -96,7 +96,7 @@ examples.
 
 ## Bundled extensions
 
-Optional tools that ship with EffectCraft but are not part of its core: they are scripts on the
+Optional tools that ship with Merlin but are not part of its core: they are scripts on the
 public scripting API, like the third-party scripts After Effects users install, and are listed
 with the bundled samples (`file.scripts.list` reports them as `extension`). A script of the same
 name in your Scripts folders takes their place.
@@ -135,7 +135,7 @@ example of a keyframe tool.
 
 ## Effect plug-ins
 
-EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 1**).
+Merlin loads third-party effects through a small, versioned plug-in API (**API version 1**).
 A plug-in effect behaves exactly like a built-in one: it is listed in Effects & Presets (and the
 Effect menu) under its category, applied by id (`effect.apply {"effect": "org.example.posterize"}`)
 or display name, its parameters are ordinary properties (keyframes, expressions, Effect Controls,
@@ -146,7 +146,7 @@ There are two ways to write one:
 | | WebAssembly plug-in | Rust plug-in |
 |---|---|---|
 | What | a `.wasm` (or `.wat`) module | a type implementing `effectcraft_effects::plugin::EffectPlugin` |
-| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links EffectCraft's crates |
+| Loaded by | Effect ▸ Load Effect Plug-in…, `effect.plugins.load {path \| folder}`, or the `Plug-ins` folder next to the settings at start-up | `register_plugin(Arc::new(MyEffect))` in an app that links Merlin's crates |
 | Sandbox | yes: no imports (no files, clock or network), fuel-limited, at most 1 GiB of memory, deterministic floats | none (it is your code) |
 | Platforms | desktop and CLI (the wasmi interpreter, crate feature `effectcraft-plugin/wasm`); not the web build | everywhere |
 
@@ -224,7 +224,7 @@ plain Rust (no dependencies):
 ```sh
 cd examples/plugins/posterize-bands
 cargo build --release --target wasm32-unknown-unknown
-# then, in EffectCraft: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
+# then, in Merlin: Effect ▸ Load Effect Plug-in… → target/wasm32-unknown-unknown/release/posterize_bands.wasm
 # or headless:
 effectcraft-cli exec effect.plugins.load '{"path": "target/wasm32-unknown-unknown/release/posterize_bands.wasm"}'
 ```

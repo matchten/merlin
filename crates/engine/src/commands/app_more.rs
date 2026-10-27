@@ -438,7 +438,7 @@ pub fn system_report(s: &Session) -> Value {
         issues.push("Export is not available in this build.".to_string());
     }
     json!({
-        "app": format!("EffectCraft {}", env!("CARGO_PKG_VERSION")),
+        "app": format!("Merlin {}", env!("CARGO_PKG_VERSION")),
         "os": crate::sysinfo::os_version(),
         "arch": std::env::consts::ARCH,
         "cpu": crate::sysinfo::cpu_name(),

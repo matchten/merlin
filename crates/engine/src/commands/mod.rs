@@ -409,13 +409,13 @@ pub(crate) fn has_project_selection(s: &Session) -> std::result::Result<(), Stri
 /// none are left, kept for future stubs).
 #[allow(dead_code)]
 pub(crate) fn not_yet(_: &Session) -> std::result::Result<(), String> {
-    Err("not available yet in EffectCraft".into())
+    Err("not available yet in Merlin".into())
 }
 
 /// `run` of a not-yet-available command.
 #[allow(dead_code)]
 pub(crate) fn not_yet_run(_: &mut Session, _: &Value) -> Result<Value> {
-    Err(EngineError::Other("not available yet in EffectCraft".into()))
+    Err(EngineError::Other("not available yet in Merlin".into()))
 }
 
 /// Hand a frontend-only command to the UI ([`crate::Event::Frontend`]).

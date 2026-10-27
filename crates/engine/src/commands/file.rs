@@ -46,8 +46,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
-    let (mut proj, repaired) =
-        Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project EffectCraft can open: {e}")))?;
+    let (mut proj, repaired) = Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project Merlin can open: {e}")))?;
     // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
@@ -61,7 +60,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         let more = repaired.len().saturating_sub(3);
         let shown = repaired.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
         let more = if more > 0 { format!(" and {more} more") } else { String::new() };
-        s.toast(format!("This project had values outside EffectCraft's limits, corrected when it opened: {shown}{more}."));
+        s.toast(format!("This project had values outside Merlin's limits, corrected when it opened: {shown}{more}."));
     }
     if let Some((_, first, why)) = refused.first() {
         let n = refused.len();
@@ -71,7 +70,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let saved_by = effectcraft_project::saved_by(&text);
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         s.toast(format!(
-            "This project was saved by EffectCraft {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
+            "This project was saved by Merlin {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
             effectcraft_project::APP_VERSION
         ));
     }

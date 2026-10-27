@@ -460,7 +460,7 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
                 Ok(json!(r.is_ok()))
             }
             "network" => Err(if s.prefs.scripting.allow_scripts_write_files {
-                "network access from scripts is not supported in EffectCraft".to_string()
+                "network access from scripts is not supported in Merlin".to_string()
             } else {
                 format!("scripts can't access the network unless {GATE} is on")
             }),

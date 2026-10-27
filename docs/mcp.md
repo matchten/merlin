@@ -34,7 +34,7 @@ for the full catalog. Each tool has a title and read-only, destructive, idempote
 open-world hints. Tools with an optional output path are conservatively annotated as file writers.
 
 Unknown top-level tool argument keys return JSON-RPC `-32602` naming the key and accepted
-arguments. EffectCraft already rejects unknown engine command parameters; that behaviour is
+arguments. Merlin already rejects unknown engine command parameters; that behaviour is
 preserved. Tool failures (including escaped panics) return `isError: true`, and so does any JSON
 result with a `failed` count above zero (a `command_batch` / `batch` with a failed step, a
 render whose queue items did not all finish), even though the other steps or items succeeded:

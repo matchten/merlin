@@ -167,14 +167,14 @@ pub(crate) fn install_hooks(ctx: &egui::Context) {
         return;
     }
     ctx.on_begin_pass(
-        "EffectCraft IME pass begin",
+        "Merlin IME pass begin",
         std::sync::Arc::new(|ui| {
             let id = mode_id(ui.ctx().viewport_id());
             ui.ctx().data_mut(|data| data.insert_temp(id, true));
         }),
     );
     ctx.on_end_pass(
-        "EffectCraft IME pass end",
+        "Merlin IME pass end",
         std::sync::Arc::new(|ui| {
             let id = mode_id(ui.ctx().viewport_id());
             ui.ctx().data_mut(|data| data.insert_temp(id, false));
