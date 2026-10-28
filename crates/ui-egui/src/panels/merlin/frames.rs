@@ -9,8 +9,8 @@ use effectcraft_engine::time::Tick;
 
 use crate::EffectcraftApp;
 
-/// The longest side of a note snapshot.
-const SNAP_SIDE: u32 = 360;
+/// The longest side of a note snapshot (tabs show them at most 112 px wide).
+const SNAP_SIDE: u32 = 240;
 
 /// Frames rendered off the UI thread: one result per job, in order.
 pub(crate) type Slot = Arc<Mutex<Option<Vec<Option<(u32, u32, Vec<u8>)>>>>>;
@@ -29,11 +29,22 @@ pub(crate) struct Pending {
     pub(super) slot: Slot,
 }
 
-/// Note snapshots being rendered: the note and its slot (start frame, then end frame for a range).
-pub(crate) type SnapJob = (u64, Slot);
+/// A note snapshot being rendered: the note, which end (0 start, 1 end), the time, its slot (one
+/// PNG).
+pub(crate) struct SnapJob {
+    id: u64,
+    which: usize,
+    at: Tick,
+    slot: Slot,
+}
 
-/// Render `times` of `comp` off the UI thread, each at most `max_side`.
+/// Render `times` of `comp` off the UI thread, each at most `max_side`, all at once (a thread
+/// each). `png`: encode them there too (the pixels come back as PNG bytes).
 pub(super) fn spawn_frames(app: &EffectcraftApp, comp: u64, times: &[Tick], max_side: u32) -> Option<Slot> {
+    spawn(app, comp, times, max_side, false)
+}
+
+fn spawn(app: &EffectcraftApp, comp: u64, times: &[Tick], max_side: u32, png: bool) -> Option<Slot> {
     let jobs: Vec<_> = times.iter().filter_map(|t| app.session.thumbnail_job(ItemId(comp), *t, max_side)).collect();
     if jobs.len() != times.len() {
         return None;
@@ -43,7 +54,21 @@ pub(super) fn spawn_frames(app: &EffectcraftApp, comp: u64, times: &[Tick], max_
     std::thread::Builder::new()
         .name("merlin-frames".into())
         .spawn(move || {
-            let out: Vec<_> = jobs.into_iter().map(|j| j()).collect();
+            let handles: Vec<_> = jobs
+                .into_iter()
+                .map(|j| {
+                    std::thread::Builder::new().name("merlin-frame".into()).spawn(move || {
+                        let f = j()?;
+                        if png {
+                            let (w, h, px) = f;
+                            encode_png(w, h, &px).map(|b| (w, h, b))
+                        } else {
+                            Some(f)
+                        }
+                    })
+                })
+                .collect();
+            let out: Vec<_> = handles.into_iter().map(|h| h.ok().and_then(|h| h.join().ok()).flatten()).collect();
             if let Ok(mut s) = s.lock() {
                 *s = Some(out);
             }
@@ -77,43 +102,74 @@ pub(super) fn snap_keys(id: u64) -> [String; 2] {
     [format!("note-snap:{id}"), format!("note-snap-end:{id}")]
 }
 
-/// Render note `id`'s snapshot (its start frame, and its end frame for a range) in the background.
+/// Render note `id`'s snapshot in the background: its start frame, and its end frame for a range,
+/// each on its own (so the start shows while the end renders) and only when its time changed.
 pub(super) fn request_snapshot(app: &mut EffectcraftApp, id: u64) {
     let Some(n) = app.ui.merlin.notes.iter().find(|n| n.id == id) else { return };
     let (s, e) = n.span();
-    let times = if e > s { vec![s, e] } else { vec![s] };
     let comp = n.comp;
-    let Some(slot) = spawn_frames(app, comp, &times, SNAP_SIDE) else { return };
-    let rt = &mut app.ui.merlin.rt;
-    rt.snap_jobs.retain(|(n, _)| *n != id);
-    rt.snap_jobs.push((id, slot));
+    let keys = snap_keys(id);
+    let wanted = if e > s { vec![(0, s), (1, e)] } else { vec![(0, s)] };
+    if e <= s {
+        // No longer a range: drop the end frame.
+        let rt = &mut app.ui.merlin.rt;
+        rt.snap_jobs.retain(|j| !(j.id == id && j.which == 1));
+        rt.snap_at.remove(&(id, 1));
+        if let Some(k) = keys.get(1) {
+            rt.frames.remove(k);
+            rt.textures.remove(k);
+        }
+    }
+    for (which, at) in wanted {
+        let rt = &app.ui.merlin.rt;
+        let have = rt.snap_at.get(&(id, which)) == Some(&at) && keys.get(which).is_some_and(|k| rt.frames.contains_key(k));
+        let pending = rt.snap_jobs.iter().any(|j| j.id == id && j.which == which && j.at == at);
+        if have || pending {
+            continue;
+        }
+        let Some(slot) = spawn(app, comp, &[at], SNAP_SIDE, true) else { continue };
+        let rt = &mut app.ui.merlin.rt;
+        rt.snap_jobs.retain(|j| !(j.id == id && j.which == which));
+        rt.snap_jobs.push(SnapJob { id, which, at, slot });
+    }
 }
 
-/// Take in finished snapshots (per frame): PNG into the frame store, the textures rebuilt.
+/// Drop the snapshots rendering for note `id` (all notes for `None`).
+pub(super) fn forget_snapshots(rt: &mut super::native::Runtime, id: Option<u64>) {
+    rt.snap_jobs.retain(|j| id.is_some_and(|id| j.id != id));
+}
+
+/// Whether a snapshot of note `id` is still rendering.
+pub(super) fn snapshot_pending(rt: &super::native::Runtime, id: u64) -> bool {
+    rt.snap_jobs.iter().any(|j| j.id == id)
+}
+
+/// Take in finished snapshots (per frame): PNG into the frame store, the texture rebuilt.
 pub(super) fn take_snapshots(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let rt = &mut app.ui.merlin.rt;
     if rt.snap_jobs.is_empty() {
         return;
     }
     let mut waiting = vec![];
-    for (id, slot) in std::mem::take(&mut rt.snap_jobs) {
-        let Some(frames) = take(&slot) else {
-            waiting.push((id, slot));
+    for job in std::mem::take(&mut rt.snap_jobs) {
+        let Some(frames) = take(&job.slot) else {
+            waiting.push(job);
             continue;
         };
-        let keys = snap_keys(id);
-        for k in &keys {
-            rt.frames.remove(k);
-            rt.textures.remove(k);
-        }
-        for (key, f) in keys.iter().zip(frames) {
-            if let Some(png) = f.and_then(|(w, h, px)| encode_png(w, h, &px)) {
-                rt.frames.insert(key.clone(), vec![png]);
+        let Some(key) = snap_keys(job.id).get(job.which).cloned() else { continue };
+        rt.textures.remove(&key);
+        match frames.into_iter().next().flatten() {
+            Some((_, _, png)) => {
+                rt.frames.insert(key, vec![png]);
+                rt.snap_at.insert((job.id, job.which), job.at);
+            }
+            None => {
+                rt.frames.remove(&key);
             }
         }
     }
     if !waiting.is_empty() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
     }
     rt.snap_jobs = waiting;
 }

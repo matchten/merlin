@@ -92,6 +92,8 @@ fn merlin_runs_a_demo_turn_and_reverts_it() {
 
     // Tool rows expand to show the script.
     let tool = h.state().ui.merlin.items.iter().rposition(|i| matches!(i, ChatItem::Tool { name, .. } if name == "run_script")).unwrap();
+    // The kept card drops its filmstrip; the log settles at the bottom again.
+    h.run_steps(2);
     click(&mut h, &format!("merlin.item.{tool}.toggle"));
     assert!(matches!(&h.state().ui.merlin.items[tool], ChatItem::Tool { open: true, input, .. } if input.contains("addText")));
 
@@ -913,4 +915,19 @@ fn merlin_film_snapshot() {
     let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-film.png");
     std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
     h.render().expect("render").save(out).unwrap();
+}
+
+#[test]
+fn a_long_chat_lays_out_only_what_is_in_view() {
+    let mut h = harness();
+    let body = "A reply with **bold**, `code` and a list:\n\n- one\n- two\n\n".repeat(3);
+    for i in 0..200 {
+        h.state_mut().ui.merlin.items.push(ChatItem::Assistant { text: format!("{i}. {body}") });
+    }
+    // The first frames measure every item (each is drawn once as it fades in).
+    h.run_steps(30);
+    let drawn = h.state().ui.merlin.drawn_items();
+    assert!(drawn > 0 && drawn < 30, "laid out {drawn} of 200 items");
+    // Still at the bottom: the last reply is the one showing.
+    assert!(h.state().auto.find("merlin.log").is_some());
 }

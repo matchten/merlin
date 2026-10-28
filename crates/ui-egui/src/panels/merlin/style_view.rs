@@ -72,7 +72,8 @@ pub(super) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &
     let EffectcraftApp { ui: state, auto, .. } = app;
     let panel = &mut state.merlin;
     let active = panel.active_style.clone();
-    let fonts = panel.rt.font_list.clone().unwrap_or_default();
+    // Borrowed out for the frame (put back below), not copied.
+    let fonts = panel.rt.font_list.take().unwrap_or_default();
     egui::ScrollArea::vertical().id_salt("merlin-style-scroll").auto_shrink([false, false]).show(&mut c, |ui| {
         ui.label(RichText::new(tr("Style kit")).font(Tokens::semibold(15.0)).color(t.text));
         ui.label(
@@ -223,11 +224,13 @@ pub(super) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &
             auto.add_response("merlin.style.notes", &resp, "Brand notes");
         });
     });
+    app.ui.merlin.rt.font_list = Some(fonts);
     for a in acts {
         apply(app, ui.ctx(), a);
     }
-    if (app.ui.merlin.rt.kits.clone(), app.ui.merlin.active_style.clone()) != before {
-        native::save_kits(app);
+    if (&app.ui.merlin.rt.kits, &app.ui.merlin.active_style) != (&before.0, &before.1) {
+        let now = app.now();
+        app.ui.merlin.rt.kits_dirty = Some(now);
     }
 }
 

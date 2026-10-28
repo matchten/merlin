@@ -31,6 +31,8 @@ const SETTINGS_ENTRY: &str = "merlin.json";
 const KITS_ENTRY: &str = "merlin-styles.json";
 /// How long a stopped turn may take to wind down before the panel stops waiting for it.
 const STOP_GRACE_SECS: f64 = 20.0;
+/// Settings and style kits are written this long after the last change.
+const SAVE_PAUSE_SECS: f64 = 0.6;
 /// A tool request unanswered this long (the app is stuck) fails the call.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Characters of a tool input shown when it is expanded.
@@ -89,6 +91,9 @@ struct Worker {
     model: String,
 }
 
+/// Images decoded off the UI thread.
+pub(super) type DecodeSlot = Arc<std::sync::Mutex<Option<Vec<Option<egui::ColorImage>>>>>;
+
 /// What the panel keeps outside its serialized state.
 #[derive(Default)]
 pub(crate) struct Runtime {
@@ -105,8 +110,15 @@ pub(crate) struct Runtime {
     /// id, an attached file's picture by `att:<path>`.
     pub(super) frames: HashMap<String, Vec<Vec<u8>>>,
     pub(super) textures: HashMap<String, Vec<egui::TextureHandle>>,
+    /// Images being decoded for [`Runtime::textures`], by key, with a signature of their bytes.
+    pub(super) decoding: HashMap<String, (u64, DecodeSlot)>,
     /// Key status for the settings view (provider, where it comes from, masked key).
     pub(super) key_status: Option<(ProviderKind, KeySource, String)>,
+    /// The key status being read (off the UI thread), for that provider.
+    key_probe: Option<(ProviderKind, Receiver<(Option<String>, KeySource)>)>,
+    /// When the settings or the style kits last changed, unsaved (written after a short pause).
+    pub(super) settings_dirty: Option<f64>,
+    pub(super) kits_dirty: Option<f64>,
     /// The key being typed in settings: never serialized, cleared once saved.
     pub(super) key_draft: String,
     /// Decoded attachments of the message being written, by path.
@@ -126,11 +138,14 @@ pub(crate) struct Runtime {
     pub(super) stretching: Option<(u64, Tick, Tick)>,
     /// Note snapshots rendering.
     pub(super) snap_jobs: Vec<super::frames::SnapJob>,
+    /// The time each note snapshot shows, by (note, 0 start / 1 end).
+    pub(super) snap_at: HashMap<(u64, usize), Tick>,
     /// The note stack's height last frame.
     pub(super) stack_h: f32,
     /// The frame shown while marking a note's area, its render, and the box being dragged (comp px).
     pub(super) mark: Option<(super::frames::FrameKey, egui::TextureHandle)>,
     pub(super) mark_job: Option<super::frames::Pending>,
+    pub(super) mark_failed: Option<super::frames::FrameKey>,
     pub(super) mark_drag: Option<egui::Pos2>,
     /// A note just added, whose text field takes the focus once.
     pub(super) focus_note: Option<u64>,
@@ -152,6 +167,17 @@ pub(crate) struct Runtime {
     /// What was last saved, and when the panel last checked.
     saved_fingerprint: u64,
     last_save_check: f64,
+    /// The conversation as last shared with the save thread, and its length then.
+    saved_conversation: Option<(usize, Arc<Vec<Message>>)>,
+    /// Each conversation item's height when last drawn, and the width it was drawn at: items
+    /// scrolled out of view take their space without being laid out.
+    pub(super) item_h: HashMap<usize, (f32, f32)>,
+    /// Replies parsed into Markdown blocks, by item, with the text length they were parsed at.
+    pub(super) md_cache: HashMap<usize, (usize, Vec<super::markdown::Block>)>,
+    /// How many conversation items were laid out last frame (the rest were out of view).
+    pub drawn_items: usize,
+    /// When the empty conversation was first shown (its mark settles after a few seconds).
+    pub(super) empty_since: Option<f64>,
 }
 
 impl Clone for Runtime {
@@ -204,6 +230,7 @@ pub(super) fn active_kit(panel: &super::MerlinPanel) -> Option<&merlin_agent::st
 
 /// Write the kit library to the settings store.
 pub(super) fn save_kits(app: &mut EffectcraftApp) {
+    app.ui.merlin.rt.kits_dirty = None;
     let Some(store) = app.session.config.clone() else { return };
     if let Ok(text) = serde_json::to_string_pretty(&app.ui.merlin.rt.kits)
         && let Err(e) = store.write(KITS_ENTRY, &text)
@@ -243,6 +270,7 @@ fn remember(app: &mut EffectcraftApp, u: merlin_agent::style::StyleUpdate) {
 }
 
 pub(super) fn save_settings(app: &mut EffectcraftApp) {
+    app.ui.merlin.rt.settings_dirty = None;
     let Some(store) = app.session.config.clone() else { return };
     match serde_json::to_string_pretty(&app.ui.merlin.settings) {
         Ok(text) => {
@@ -424,6 +452,8 @@ pub(super) fn remove_note(app: &mut EffectcraftApp, id: u64) {
     if p.marking_note == Some(id) {
         p.marking_note = None;
     }
+    p.rt.snap_at.retain(|(n, _), _| *n != id);
+    super::frames::forget_snapshots(&mut p.rt, Some(id));
     let [snap, snap_end] = super::frames::snap_keys(id);
     for k in [format!("note-before:{id}"), format!("note-after:{id}"), snap, snap_end] {
         p.rt.frames.remove(&k);
@@ -1022,6 +1052,15 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     take_attachments(app, ctx);
     super::frames::take_snapshots(app, ctx);
     sync_chat(app, now);
+    // Settings and kits are written once typing pauses.
+    for (dirty, save) in [(app.ui.merlin.rt.settings_dirty, save_settings as fn(&mut EffectcraftApp)), (app.ui.merlin.rt.kits_dirty, save_kits)] {
+        let Some(at) = dirty else { continue };
+        if now - at >= SAVE_PAUSE_SECS {
+            save(app);
+        } else {
+            ctx.request_repaint_after(Duration::from_secs_f64(SAVE_PAUSE_SECS));
+        }
+    }
     if let Some((tx, rx)) = app.ui.merlin.rt.requests.take() {
         let mut reqs = std::mem::take(&mut app.ui.merlin.rt.deferred);
         while let Ok(r) = rx.try_recv() {
@@ -1132,34 +1171,53 @@ fn save_chat(app: &mut EffectcraftApp, project: &str) {
         }
         return;
     }
-    let note_frames = panel
-        .rt
-        .frames
-        .iter()
-        .filter(|(k, _)| k.starts_with("note-"))
-        .filter_map(|(k, v)| v.first().map(|png| (k.clone(), merlin_agent::base64::encode(png))))
-        .collect();
-    let saved = SavedChat {
-        version: 1,
-        items: panel.items.clone(),
-        notes: panel.notes.clone(),
-        conversation: panel.rt.conversation.clone(),
-        note_frames,
-        style: panel.active_style.clone(),
-    };
-    let text = match serde_json::to_string(&saved) {
-        Ok(t) => t,
-        Err(e) => {
-            app.ui.status = format!("Merlin chat: {e}");
-            return;
-        }
-    };
+    // Only cheap copies here: the conversation (with its images) is shared, and the encoding and
+    // writing happen on the save thread.
+    let frames: Vec<(String, Vec<u8>)> =
+        panel.rt.frames.iter().filter(|(k, _)| k.starts_with("note-")).filter_map(|(k, v)| v.first().map(|png| (k.clone(), png.clone()))).collect();
+    let conversation = shared_conversation(&mut app.ui.merlin.rt);
+    let panel = &app.ui.merlin;
+    let (items, notes, style) = (panel.items.clone(), panel.notes.clone(), panel.active_style.clone());
     let _ = std::thread::Builder::new().name("merlin-save".into()).spawn(move || {
+        let note_frames = frames.into_iter().map(|(k, png)| (k, merlin_agent::base64::encode(&png))).collect();
+        let saved = SavedChatRef { version: 1, items: &items, notes: &notes, conversation: &conversation, note_frames, style: &style };
+        let text = match serde_json::to_string(&saved) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("Merlin chat: {e}");
+                return;
+            }
+        };
         let tmp = path.with_extension("merlin.json.tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
     });
+}
+
+/// The conversation as a shared copy for saving, made again only when it changed (it only grows,
+/// once per turn).
+fn shared_conversation(rt: &mut Runtime) -> Arc<Vec<Message>> {
+    match &rt.saved_conversation {
+        Some((n, c)) if *n == rt.conversation.len() => c.clone(),
+        _ => {
+            let c = Arc::new(rt.conversation.clone());
+            rt.saved_conversation = Some((rt.conversation.len(), c.clone()));
+            c
+        }
+    }
+}
+
+/// [`SavedChat`], borrowed (written on the save thread).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedChatRef<'a> {
+    version: u32,
+    items: &'a [ChatItem],
+    notes: &'a [Note],
+    conversation: &'a [Message],
+    note_frames: std::collections::BTreeMap<String, String>,
+    style: &'a str,
 }
 
 /// Start the panel over for another project (its notes, chat and conversation).
@@ -1172,9 +1230,13 @@ fn reset_chat(app: &mut EffectcraftApp) {
     p.active_style = p.settings.style.clone();
     p.rt.stretching = None;
     p.marking_note = None;
+    p.rt.snap_at.clear();
+    super::frames::forget_snapshots(&mut p.rt, None);
     p.rt.conversation.clear();
     p.rt.checkpoints.clear();
     p.rt.appear.clear();
+    p.rt.item_h.clear();
+    p.rt.md_cache.clear();
     p.rt.frames.retain(|k, _| k.starts_with("att:"));
     p.rt.textures.clear();
 }
@@ -1188,6 +1250,8 @@ fn load_chat(app: &mut EffectcraftApp, project: &str) {
     };
     let p = &mut app.ui.merlin;
     p.items = saved.items;
+    p.rt.item_h.clear();
+    p.rt.md_cache.clear();
     p.notes = saved.notes;
     if p.rt.kits.iter().any(|k| k.name == saved.style) {
         p.active_style = saved.style;
@@ -1298,6 +1362,8 @@ pub(super) fn new_chat(app: &mut EffectcraftApp) {
     p.items.clear();
     p.rt.conversation.clear();
     p.rt.appear.clear();
+    p.rt.item_h.clear();
+    p.rt.md_cache.clear();
     p.rt.frames.retain(|k, _| p.attachments.iter().any(|a| *k == format!("att:{}", a.path)));
     p.rt.textures.clear();
 }
@@ -1324,10 +1390,37 @@ pub(super) fn save_or_remove_key(app: &mut EffectcraftApp, save: bool) {
 
 /// Read where the key for `kind` comes from (once per provider shown).
 pub(super) fn refresh_key_status(app: &mut EffectcraftApp, kind: ProviderKind) {
-    if app.ui.merlin.rt.key_status.as_ref().is_none_or(|(k, _, _)| *k != kind) {
-        let (key, source) = if kind == ProviderKind::Demo { (None, KeySource::Missing) } else { keys::get(kind) };
-        app.ui.merlin.rt.key_status = Some((kind, source, key.as_deref().map(keys::masked).unwrap_or_default()));
+    let rt = &mut app.ui.merlin.rt;
+    // A keychain read can wait on the system (a permission prompt): it runs off the UI thread.
+    if let Some((k, rx)) = &rt.key_probe {
+        if let Ok((key, source)) = rx.try_recv() {
+            rt.key_status = Some((*k, source, key.as_deref().map(keys::masked).unwrap_or_default()));
+            rt.key_probe = None;
+        } else if *k == kind {
+            return;
+        }
     }
+    if rt.key_status.as_ref().is_none_or(|(k, _, _)| *k != kind) {
+        if kind == ProviderKind::Demo {
+            rt.key_status = Some((kind, KeySource::Missing, String::new()));
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        if std::thread::Builder::new()
+            .name("merlin-key".into())
+            .spawn(move || {
+                let _ = tx.send(keys::get(kind));
+            })
+            .is_ok()
+        {
+            rt.key_probe = Some((kind, rx));
+        }
+    }
+}
+
+/// Whether the key status is still being read.
+pub(super) fn key_checking(rt: &Runtime) -> bool {
+    rt.key_probe.is_some()
 }
 
 /// What the running turn is doing, for the working line (`None`: no turn).
@@ -1349,4 +1442,11 @@ pub(super) fn chip_appear(ctx: &egui::Context, rt: &mut Runtime, path: &str) -> 
         ctx.request_repaint();
     }
     k
+}
+
+impl super::MerlinPanel {
+    /// How many conversation items were laid out last frame (the rest were scrolled out of view).
+    pub fn drawn_items(&self) -> usize {
+        self.rt.drawn_items
+    }
 }

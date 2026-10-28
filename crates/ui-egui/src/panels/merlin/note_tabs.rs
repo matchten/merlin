@@ -199,7 +199,9 @@ pub(super) fn tab(
                         }
                         None => {
                             ui.painter().rect_filled(r, 5.0, t.app_bg);
-                            egui::Spinner::new().size(14.0).color(look.magic).paint_at(ui, Rect::from_center_size(r.center(), vec2(14.0, 14.0)));
+                            if frames::snapshot_pending(rt, id) || super::view::decoding(rt, key) {
+                                super::view::spinner(ui, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), look.magic);
+                            }
                         }
                     }
                     if let (Some([x, y, rw, rh]), Some(comp)) = (note.region, session.project.comp(ItemId(note.comp))) {
@@ -428,14 +430,17 @@ pub(super) fn mark_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look
         match frames::take_textures(&ctx, p, "merlin-mark") {
             Some(mut texs) => {
                 let k = p.key;
-                app.ui.merlin.rt.mark = texs.pop().map(|tx| (k, tx));
+                let tex = texs.pop();
+                // A frame that didn't render isn't asked for again (until the project changes).
+                app.ui.merlin.rt.mark_failed = tex.is_none().then_some(k);
+                app.ui.merlin.rt.mark = tex.map(|tx| (k, tx));
                 app.ui.merlin.rt.mark_job = None;
             }
             None => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
         }
     }
     let fresh = app.ui.merlin.rt.mark.as_ref().is_some_and(|(k, _)| *k == key);
-    if !fresh && app.ui.merlin.rt.mark_job.is_none() {
+    if !fresh && app.ui.merlin.rt.mark_job.is_none() && app.ui.merlin.rt.mark_failed != Some(key) {
         let px = (img.width().max(img.height()) * ctx.pixels_per_point()).clamp(64.0, 1600.0) as u32;
         if let Some(slot) = frames::spawn_frames(app, note.comp, &[note.start], px) {
             app.ui.merlin.rt.mark_job = Some(Pending { key, slot });
@@ -446,7 +451,7 @@ pub(super) fn mark_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look
         Some((_, tex)) => {
             ui.painter().image(tex.id(), img, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         }
-        None => egui::Spinner::new().size(20.0).color(look.magic).paint_at(ui, Rect::from_center_size(img.center(), vec2(20.0, 20.0))),
+        None => super::view::spinner(ui, Rect::from_center_size(img.center(), vec2(20.0, 20.0)), look.magic),
     }
     ui.painter().rect_stroke(img, 4.0, Stroke::new(1.0, look.border), StrokeKind::Inside);
 

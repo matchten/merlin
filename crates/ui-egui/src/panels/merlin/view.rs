@@ -23,6 +23,8 @@ const THUMB_W: f32 = 112.0;
 pub(super) const CHIPS_H: f32 = 28.0;
 /// How long a new item takes to fade and slide in (seconds).
 const APPEAR_SECS: f64 = 0.28;
+/// How long the empty conversation's mark bobs before it rests.
+const EMPTY_BOB_SECS: f64 = 3.0;
 /// Body text size.
 const BODY: f32 = 13.0;
 
@@ -208,7 +210,33 @@ fn shimmer(ui: &mut egui::Ui, text: &str, size: f32, look: &Look, now: f64) {
         job.append(&ch.to_string(), 0.0, TextFormat { font_id: Tokens::medium(size), color, ..Default::default() });
     }
     ui.label(job);
-    ui.ctx().request_repaint();
+    tick(ui.ctx());
+}
+
+/// Wake for the next frame of a decorative animation, at about 30 fps (not the display's full
+/// rate: real news from the worker repaints right away anyway).
+pub(super) fn tick(ctx: &egui::Context) {
+    ctx.request_repaint_after(std::time::Duration::from_millis(33));
+}
+
+/// A busy indicator: an arc turning in `r` (egui's spinner repaints at full rate).
+pub(super) fn spinner(ui: &egui::Ui, r: Rect, color: Color32) {
+    let now = ui.input(|i| i.time);
+    let c = r.center();
+    let rad = r.width().min(r.height()) / 2.0 - 1.0;
+    let start = now * std::f64::consts::TAU * 0.9;
+    let pts: Vec<egui::Pos2> = (0..=16)
+        .map(|k| {
+            let a = start + (k as f64 / 16.0) * std::f64::consts::PI * 1.4;
+            c + rad * vec2(a.cos() as f32, a.sin() as f32)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(pts, Stroke::new(1.6, color)));
+    tick(ui.ctx());
+}
+
+fn lerp_f(a: f32, b: f32, k: f32) -> f32 {
+    a + (b - a) * k
 }
 
 pub(super) fn lerp(a: Color32, b: Color32, k: f32) -> Color32 {
@@ -277,7 +305,7 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
     paint_mark(&p, pos2(r.min.x + 20.0, cy), 15.0, look, now, busy);
     let name = p.text(pos2(r.min.x + 33.0, cy), Align2::LEFT_CENTER, "Merlin", Tokens::semibold(13.5), t.text);
     if busy {
-        ui.ctx().request_repaint();
+        tick(ui.ctx());
     }
 
     // Right to left: Settings, New Chat; the model pill takes what is left.
@@ -364,6 +392,7 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
         empty_ui(app, ui, r, look, now, acts);
         return;
     }
+    app.ui.merlin.rt.empty_since = None;
     let mut c = child(ui, r.shrink2(vec2(12.0, 8.0)));
     let EffectcraftApp { ui: state, auto, session, .. } = app;
     let panel = &mut state.merlin;
@@ -374,10 +403,28 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
         ui.spacing_mut().item_spacing.y = 6.0;
         let latest: Vec<u64> = panel.rt.checkpoints.iter().filter(|(_, cp)| cp.is_latest(session)).map(|(id, _)| *id).collect();
         let mut after_user = false;
+        let width = ui.available_width();
+        let view = ui.clip_rect();
+        panel.rt.drawn_items = 0;
         for (i, item) in panel.items.iter().enumerate() {
-            let k = appear(&ctx, &mut panel.rt, i, now);
             let is_user = matches!(item, ChatItem::User { .. });
             let is_turn = matches!(item, ChatItem::Turn { .. });
+            // Out of view: take the item's space without laying it out (the last item, which may be
+            // growing, is always drawn).
+            let top = ui.cursor().min.y;
+            if i + 1 < count
+                && let Some(&(w, h)) = panel.rt.item_h.get(&i)
+                && (w - width).abs() < 0.5
+                && (top + h < view.min.y || top > view.max.y)
+            {
+                ui.add_space(h);
+                // Old items scrolled to later don't fade in.
+                panel.rt.appear.entry(i).or_insert(now - APPEAR_SECS);
+                after_user = is_user;
+                continue;
+            }
+            panel.rt.drawn_items += 1;
+            let k = appear(&ctx, &mut panel.rt, i, now);
             ui.scope(|ui| {
                 ui.multiply_opacity(k);
                 ui.add_space((1.0 - k) * 10.0);
@@ -453,7 +500,15 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                             }
                         }
                     }
-                    ChatItem::Assistant { text } => markdown_ui(ui, text, look),
+                    ChatItem::Assistant { text } => {
+                        let fresh = panel.rt.md_cache.get(&i).is_some_and(|(n, _)| *n == text.len());
+                        if !fresh {
+                            panel.rt.md_cache.insert(i, (text.len(), markdown::parse(text)));
+                        }
+                        if let Some((_, blocks)) = panel.rt.md_cache.get(&i) {
+                            markdown_ui(ui, blocks, look);
+                        }
+                    }
                     ChatItem::Thinking { text, open } => {
                         let live = busy && i + 1 == count;
                         let resp = disclosure(ui, *open, look, |ui| {
@@ -514,6 +569,8 @@ fn log_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now
                     }
                 }
             });
+            // Its height, for when it scrolls out of view (without the fade-in's offset).
+            panel.rt.item_h.insert(i, (width, ui.cursor().min.y - top - (1.0 - k) * 10.0));
             after_user = is_user;
         }
         if let Some(status) = native::working_status(&panel.rt) {
@@ -552,12 +609,17 @@ fn empty_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, n
     c.add_space((r.height() * 0.16).max(8.0));
     c.vertical_centered(|ui| {
         let (mr, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
-        let bob = 2.5 * (wave(now, 1.6, 0.0) - 0.5);
+        // The mark bobs for a few seconds, then rests so an idle app stops repainting.
+        let since = *app.ui.merlin.rt.empty_since.get_or_insert(now);
+        let k = (1.0 - (now - since) / EMPTY_BOB_SECS).clamp(0.0, 1.0) as f32;
+        let bob = 2.5 * (wave(now, 1.6, 0.0) - 0.5) * k;
         let center = mr.center() + vec2(0.0, bob);
-        ui.painter().circle_filled(center, 26.0, look.magic.gamma_multiply(0.08 + 0.06 * wave(now, 1.6, 0.0)));
+        ui.painter().circle_filled(center, 26.0, look.magic.gamma_multiply(0.08 + 0.06 * lerp_f(0.5, wave(now, 1.6, 0.0), k)));
         ui.painter().circle_stroke(center, 26.0, Stroke::new(1.0, look.magic.gamma_multiply(0.35)));
         icons::paint(ui.painter(), Rect::from_center_size(center, vec2(26.0, 26.0)), Icon::Sparkle, look.magic);
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        if k > 0.0 {
+            tick(ui.ctx());
+        }
         ui.add_space(10.0);
         ui.label(RichText::new(tr("What should we make?")).font(Tokens::semibold(16.0)).color(t.text));
         ui.add_space(2.0);
@@ -601,32 +663,32 @@ fn empty_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, n
 }
 
 /// A reply, formatted.
-fn markdown_ui(ui: &mut egui::Ui, text: &str, look: &Look) {
+fn markdown_ui(ui: &mut egui::Ui, blocks: &[Block], look: &Look) {
     let t = look.t;
     let width = ui.available_width();
-    for block in markdown::parse(text) {
+    for block in blocks {
         match block {
             Block::Paragraph(spans) => {
-                ui.label(spans_job(&spans, BODY, t.text, look, width));
+                ui.label(spans_job(spans, BODY, t.text, look, width));
             }
             Block::Heading(level, spans) => {
                 ui.add_space(4.0);
-                let size = match level {
+                let size = match *level {
                     1 => 16.0,
                     2 => 14.5,
                     _ => 13.5,
                 };
-                let spans: Vec<Span> = spans.into_iter().map(|s| Span { bold: true, ..s }).collect();
+                let spans: Vec<Span> = spans.iter().map(|s| Span { bold: true, ..s.clone() }).collect();
                 ui.label(spans_job(&spans, size, t.text, look, width));
             }
             Block::Item { marker, depth, spans } => {
                 ui.horizontal_top(|ui| {
-                    ui.add_space(4.0 + depth as f32 * 14.0);
-                    let bullet = if marker == "•" { "•".to_string() } else { marker };
+                    ui.add_space(4.0 + *depth as f32 * 14.0);
+                    let bullet = marker.clone();
                     let color = if bullet == "•" { look.magic } else { t.text_dim };
                     ui.label(RichText::new(bullet).font(Tokens::semibold(BODY)).color(color));
                     let w = ui.available_width();
-                    ui.label(spans_job(&spans, BODY, t.text, look, w));
+                    ui.label(spans_job(spans, BODY, t.text, look, w));
                 });
             }
             Block::Code { lang, text } => {
@@ -638,9 +700,9 @@ fn markdown_ui(ui: &mut egui::Ui, text: &str, look: &Look) {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if !lang.is_empty() {
-                            ui.label(RichText::new(lang).font(Tokens::ui(10.5)).color(t.text_faint));
+                            ui.label(RichText::new(lang.as_str()).font(Tokens::ui(10.5)).color(t.text_faint));
                         }
-                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::mono(11.5)).color(t.text_dim)).wrap());
+                        ui.add(egui::Label::new(RichText::new(text.as_str()).font(Tokens::mono(11.5)).color(t.text_dim)).wrap());
                     });
             }
             Block::Rule => {
@@ -723,7 +785,7 @@ fn tool_card(
             let cy = row.center().y;
             let status = Rect::from_center_size(pos2(row.min.x + 7.0, cy), vec2(14.0, 14.0));
             match state {
-                ToolState::Pending | ToolState::Running => egui::Spinner::new().size(12.0).color(look.magic).paint_at(ui, status),
+                ToolState::Pending | ToolState::Running => spinner(ui, status.shrink(1.0), look.magic),
                 ToolState::Done => {
                     p.circle_filled(status.center(), 6.5, t.cache_green.gamma_multiply(0.9));
                     let c = status.center();
@@ -838,15 +900,27 @@ fn turn_card(
             if rt.frames.contains_key(&bk) && rt.frames.contains_key(&ak) {
                 ui.add_space(6.0);
                 let ctx = ui.ctx().clone();
-                let texs: Vec<egui::TextureHandle> = textures(&ctx, rt, if before { &bk } else { &ak }).to_vec();
-                let n = texs.len().max(1) as f32;
+                // Both sets decode up front so the toggle swaps without a gap; until one is ready, its
+                // place is kept at the other's size.
+                let (shown, other) = if before { (&bk, &ak) } else { (&ak, &bk) };
+                let other: Vec<egui::TextureHandle> = textures(&ctx, rt, other).to_vec();
+                let texs: Vec<egui::TextureHandle> = textures(&ctx, rt, shown).to_vec();
+                let sizes: Vec<[usize; 2]> = if texs.is_empty() { other.iter().map(|t| t.size()).collect() } else { texs.iter().map(|t| t.size()).collect() };
+                let n = sizes.len().max(1) as f32;
                 let w = ((ui.available_width() - 3.0 * (n - 1.0)) / n).max(20.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
-                    for tx in &texs {
-                        let [tw, th] = tx.size();
-                        let size = vec2(w, w * th.max(1) as f32 / tw.max(1) as f32);
-                        ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tx.id(), size)).corner_radius(3.0));
+                    for (k, [tw, th]) in sizes.iter().enumerate() {
+                        let size = vec2(w, w * (*th).max(1) as f32 / (*tw).max(1) as f32);
+                        match texs.get(k) {
+                            Some(tx) => {
+                                ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tx.id(), size)).corner_radius(3.0));
+                            }
+                            None => {
+                                let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+                                ui.painter().rect_filled(r, 3.0, t.app_bg);
+                            }
+                        }
                     }
                 });
                 ui.horizontal(|ui| {
@@ -903,26 +977,80 @@ fn tokens(n: u64) -> String {
     if n >= 10_000 { format!("{}k", n / 1000) } else { n.to_string() }
 }
 
-/// The textures of the images under `key` in [`Runtime::frames`], made on first use.
+/// The textures of the images under `key` in [`Runtime::frames`]: decoded (and scaled down to
+/// thumbnail size) off the UI thread on first use, so empty until then.
 pub(super) fn textures<'a>(ctx: &egui::Context, rt: &'a mut Runtime, key: &str) -> &'a [egui::TextureHandle] {
     if !rt.textures.contains_key(key) {
-        let texs: Vec<egui::TextureHandle> = rt
-            .frames
-            .get(key)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, png)| {
-                let img = image::load_from_memory(png).ok()?.to_rgba8();
-                let size = [img.width() as usize, img.height() as usize];
-                let ci = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-                Some(ctx.load_texture(format!("merlin-{key}-{i}"), ci, egui::TextureOptions::LINEAR))
-            })
-            .collect();
-        rt.textures.insert(key.to_string(), texs);
+        decode(ctx, rt, key);
     }
     rt.textures.get(key).map(Vec::as_slice).unwrap_or_default()
+}
+
+/// The longest side images are decoded at for the chat (they show at most ~240 px wide).
+const DECODE_SIDE: u32 = 480;
+
+/// Start decoding `key`'s images, or take them in once decoded.
+fn decode(ctx: &egui::Context, rt: &mut Runtime, key: &str) {
+    let Some(pngs) = rt.frames.get(key) else { return };
+    let sig = signature(pngs);
+    if let Some((s, slot)) = rt.decoding.get(key) {
+        let done = slot.lock().ok().and_then(|mut d| d.take());
+        let fresh = *s == sig;
+        match done {
+            Some(images) if fresh => {
+                let texs = images
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, ci)| Some(ctx.load_texture(format!("merlin-{key}-{i}"), ci?, egui::TextureOptions::LINEAR)))
+                    .collect();
+                rt.textures.insert(key.to_string(), texs);
+                rt.decoding.remove(key);
+                return;
+            }
+            None if fresh => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                return;
+            }
+            // The images changed while decoding: start over.
+            _ => {}
+        }
+    }
+    let pngs = pngs.clone();
+    let slot: native::DecodeSlot = Default::default();
+    let out = slot.clone();
+    let spawned = std::thread::Builder::new().name("merlin-decode".into()).spawn(move || {
+        let images = pngs
+            .iter()
+            .map(|png| {
+                let img = image::load_from_memory(png).ok()?;
+                let img = if img.width().max(img.height()) > DECODE_SIDE { img.thumbnail(DECODE_SIDE, DECODE_SIDE) } else { img };
+                let img = img.to_rgba8();
+                Some(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+            })
+            .collect();
+        if let Ok(mut o) = out.lock() {
+            *o = Some(images);
+        }
+    });
+    if spawned.is_ok() {
+        rt.decoding.insert(key.to_string(), (sig, slot));
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    } else {
+        rt.textures.insert(key.to_string(), vec![]);
+    }
+}
+
+/// Tells one set of images from another (to drop a decode whose images were replaced meanwhile).
+fn signature(pngs: &[Vec<u8>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pngs.hash(&mut h);
+    h.finish()
+}
+
+/// Whether `key`'s images are still being decoded.
+pub(super) fn decoding(rt: &Runtime, key: &str) -> bool {
+    rt.decoding.contains_key(key)
 }
 
 /// A row of the images under `keys` (a tool call's rendered frames, a message's attachments).
@@ -1126,7 +1254,7 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         p.circle_filled(c0, ring, look.magic.gamma_multiply(0.15));
         p.circle_filled(c0, 12.0 + hot, t.text);
         p.rect_filled(Rect::from_center_size(c0, vec2(8.0, 8.0)), 2.0, t.panel_bg);
-        ui.ctx().request_repaint();
+        tick(ui.ctx());
     } else {
         let fill = if enabled { lerp(t.accent, t.accent_hover, hot) } else { t.field_border };
         p.circle_filled(c0, 12.0 + hot, fill);
@@ -1237,7 +1365,7 @@ fn chips_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, left: f32, right: f32, 
         ui.painter().rect_stroke(chip, 7.0, Stroke::new(1.0, stroke.gamma_multiply(k)), StrokeKind::Inside);
         let slot = Rect::from_min_size(pos2(chip.min.x + PAD, chip.center().y - THUMB / 2.0), vec2(THUMB, THUMB));
         match a.state {
-            AttachState::Loading => egui::Spinner::new().size(THUMB - 4.0).color(look.magic).paint_at(ui, slot.shrink(2.0)),
+            AttachState::Loading => spinner(ui, slot.shrink(2.0), look.magic),
             AttachState::Ready => {
                 if let Some(tex) = textures(&ctx, &mut panel.rt, &format!("att:{}", a.path)).first() {
                     let [tw, th] = tex.size();
@@ -1369,7 +1497,9 @@ fn settings_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
 
         if kind != ProviderKind::Demo {
             section(ui, tr("API KEY"), look, |ui| {
+                let checking = native::key_checking(&panel.rt);
                 let (status, ok) = match &panel.rt.key_status {
+                    _ if checking => (tr("Checking…").to_string(), true),
                     Some((_, KeySource::Env, m)) => (tr_args("From {} ({})", &[&kind.env_var(), m]), true),
                     Some((_, KeySource::Keychain, m)) => (tr_args("Stored in the keychain ({})", &[m]), true),
                     _ if kind.needs_key() => (tr("Not set").to_string(), false),
@@ -1411,7 +1541,8 @@ fn settings_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         }
     });
     if app.ui.merlin.settings != before {
-        native::save_settings(app);
+        let now = app.now();
+        app.ui.merlin.rt.settings_dirty = Some(now);
     }
 }
 
