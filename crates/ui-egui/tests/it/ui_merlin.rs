@@ -1153,3 +1153,18 @@ fn merlin_chats_snapshot() {
     std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
     h.render().expect("render").save(out).unwrap();
 }
+
+/// A chat with only notes is named after its first note in the chat menu, with its note count.
+#[test]
+fn a_chat_of_notes_is_named_by_its_first_note() {
+    let mut h = harness();
+    board(&mut h);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::panels::merlin::apply_ui_set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1.0, "text": "Flash white here"}})).unwrap();
+    h.run_steps(1);
+    assert_eq!(h.state().ui.merlin.chat_list()[0].1, "Flash white here");
+    click(&mut h, "merlin.newChat");
+    let list = h.state().ui.merlin.chat_list();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].1, "Flash white here");
+}

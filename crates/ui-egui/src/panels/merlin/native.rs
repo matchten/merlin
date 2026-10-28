@@ -1191,6 +1191,8 @@ pub(crate) struct ChatMeta {
     pub(super) title: String,
     pub(super) created: i64,
     pub(super) updated: i64,
+    /// Notes still waiting to be sent (shown in the chat menu).
+    pub(super) open_notes: usize,
 }
 
 /// One of the project's other chats: its name, and the chat as saved (JSON, read only when it's
@@ -1209,15 +1211,19 @@ fn now_secs() -> i64 {
 fn fresh_meta(rt: &mut Runtime) {
     let id = rt.chats.iter().map(|c| c.meta.id).max().unwrap_or(0).max(rt.chat.id).saturating_add(1);
     let now = now_secs();
-    rt.chat = ChatMeta { id, title: String::new(), created: now, updated: now };
+    rt.chat = ChatMeta { id, created: now, updated: now, ..ChatMeta::default() };
 }
 
-/// A chat's name from its first message (its first line, shortened).
-fn auto_title(items: &[ChatItem]) -> Option<String> {
-    items.iter().find_map(|i| match i {
-        ChatItem::User { text, .. } => text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| super::view::short(l, 40)),
-        _ => None,
-    })
+/// A chat's name from its first message, or its first note before any (the first line, shortened).
+fn auto_title(items: &[ChatItem], notes: &[Note]) -> Option<String> {
+    let first_line = |t: &str| t.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| super::view::short(l, 40));
+    items
+        .iter()
+        .find_map(|i| match i {
+            ChatItem::User { text, .. } => first_line(text),
+            _ => None,
+        })
+        .or_else(|| notes.iter().find_map(|n| first_line(&n.text)))
 }
 
 /// The open chat's name.
@@ -1225,7 +1231,7 @@ pub(super) fn chat_title(panel: &super::MerlinPanel) -> String {
     if !panel.rt.chat.title.trim().is_empty() {
         return panel.rt.chat.title.trim().to_string();
     }
-    auto_title(&panel.items).unwrap_or_else(|| tr("New chat").to_string())
+    auto_title(&panel.items, &panel.notes).unwrap_or_else(|| tr("New chat").to_string())
 }
 
 /// The open chat has nothing in it yet.
@@ -1249,6 +1255,7 @@ fn stash_open(app: &mut EffectcraftApp) -> Option<StoredChat> {
     let data = serde_json::to_string(&saved).ok()?;
     let mut meta = p.rt.chat.clone();
     meta.title = chat_title(p);
+    meta.open_notes = p.notes.iter().filter(|n| n.status == NoteStatus::Open).count();
     Some(StoredChat { meta, data: Arc::new(data) })
 }
 
@@ -1336,7 +1343,7 @@ pub(super) fn rename_chat(app: &mut EffectcraftApp, title: &str) {
 /// The chat menu's rows, most recently used first: id, name, last used, open notes, open.
 pub(super) fn chat_rows(panel: &super::MerlinPanel) -> Vec<(u64, String, i64, usize, bool)> {
     let open_notes = panel.notes.iter().filter(|n| n.status == NoteStatus::Open).count();
-    let mut rows: Vec<_> = panel.rt.chats.iter().map(|c| (c.meta.id, c.meta.title.clone(), c.meta.updated, 0, false)).collect();
+    let mut rows: Vec<_> = panel.rt.chats.iter().map(|c| (c.meta.id, c.meta.title.clone(), c.meta.updated, c.meta.open_notes, false)).collect();
     if !is_blank(panel) || rows.is_empty() {
         rows.push((panel.rt.chat.id, chat_title(panel), panel.rt.chat.updated, open_notes, true));
     }
@@ -1387,8 +1394,9 @@ fn save_chat(app: &mut EffectcraftApp, project: &str) {
     let others: Vec<(ChatMeta, Arc<String>)> = panel.rt.chats.iter().map(|c| (c.meta.clone(), c.data.clone())).collect();
     let mut meta = panel.rt.chat.clone();
     if meta.title.is_empty() {
-        meta.title = auto_title(&panel.items).unwrap_or_default();
+        meta.title = auto_title(&panel.items, &panel.notes).unwrap_or_default();
     }
+    meta.open_notes = panel.notes.iter().filter(|n| n.status == NoteStatus::Open).count();
     let conversation = shared_conversation(&mut app.ui.merlin.rt);
     let panel = &app.ui.merlin;
     let (items, notes, style) = (panel.items.clone(), panel.notes.clone(), panel.active_style.clone());
