@@ -59,6 +59,11 @@ enum Act {
     Restore(usize),
     DiscardPlan(usize),
     SetMode(Mode),
+    ToggleChats,
+    OpenChat(u64),
+    AskDelete(u64),
+    DeleteChat(u64),
+    Rename(String),
 }
 
 /// The panel's colours, derived from the theme so light and dark both work.
@@ -122,7 +127,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         match a {
             Act::Send => native::start_turn(app, &ctx),
             Act::Stop => native::stop_turn(app, now),
-            Act::NewChat => native::new_chat(app),
+            Act::NewChat => {
+                native::new_chat(app);
+                ctx.memory_mut(|m| m.request_focus(input_id()));
+            }
             Act::Attach => native::pick_attachments(app, &ctx),
             Act::Unattach(i) => native::unattach(app, i),
             Act::ToggleSettings => {
@@ -164,6 +172,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Act::Restore(i) => native::restore(app, &ctx, i),
             Act::DiscardPlan(i) => native::discard_plan(app, i),
             Act::SetMode(m) => app.ui.merlin.mode = m,
+            Act::ToggleChats => {
+                let rt = &mut app.ui.merlin.rt;
+                rt.chats_open = !rt.chats_open;
+                rt.confirm_delete = None;
+            }
+            Act::OpenChat(id) => {
+                if let Err(e) = native::open_chat(app, id) {
+                    app.ui.status = e;
+                }
+            }
+            // A first click on × asks ("Delete?"), the second deletes.
+            Act::AskDelete(id) => app.ui.merlin.rt.confirm_delete = Some(id),
+            Act::DeleteChat(id) => native::delete_chat(app, id),
+            Act::Rename(title) => native::rename_chat(app, &title),
             Act::PinFrame => super::mentions::pin_current_frame(app),
             Act::PinLayers => super::mentions::pin_selected_layers(app),
         }
@@ -307,12 +329,11 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
     let cy = r.center().y;
     let busy = app.ui.merlin.busy;
     paint_mark(&p, pos2(r.min.x + 20.0, cy), 15.0, look, now, busy);
-    let name = p.text(pos2(r.min.x + 33.0, cy), Align2::LEFT_CENTER, "Merlin", Tokens::semibold(13.5), t.text);
     if busy {
         tick(ui.ctx());
     }
 
-    // Right to left: Settings, New Chat; the model pill takes what is left.
+    // Right to left: Settings, Style, New Chat; the chat's name and its menu take what is left.
     let settings = Rect::from_center_size(pos2(r.max.x - 20.0, cy), vec2(26.0, 26.0));
     let open = app.ui.merlin.settings_open;
     let resp = icon_btn(ui, settings, Icon::Gear, open, true, look, "settings");
@@ -347,13 +368,165 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
         let new_chat = Rect::from_center_size(pos2(right - 13.0, cy), vec2(26.0, 26.0));
         let resp = icon_btn(ui, new_chat, Icon::Plus, false, !busy, look, "newChat");
         app.auto.add("merlin.newChat", new_chat, "New Chat");
-        if resp.on_hover_text(tr("New chat")).clicked() {
+        if resp.on_hover_text(tr("New chat (this one stays in the chat list)")).clicked() {
             acts.push(Act::NewChat);
         }
         right = new_chat.min.x - 6.0;
     }
+    chat_title_ui(app, ui, r.min.x + 32.0, right, cy, look, acts);
+}
 
-    let _ = (name, right);
+/// The open chat's name with a ▾ that opens the chat list; double-click to rename.
+#[allow(clippy::too_many_arguments)]
+fn chat_title_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, left: f32, right: f32, cy: f32, look: &Look, acts: &mut Vec<Act>) {
+    let t = look.t;
+    let max_w = right - left;
+    if max_w < 40.0 {
+        return;
+    }
+    // Renaming: a field in the name's place (Enter keeps it, Escape or clicking away drops it).
+    if let Some(mut draft) = app.ui.merlin.rt.rename.take() {
+        let fr = Rect::from_min_max(pos2(left, cy - 11.0), pos2(right, cy + 11.0));
+        let mut c = child(ui, fr);
+        let resp =
+            c.add(egui::TextEdit::singleline(&mut draft).id(egui::Id::unique("merlin-chat-rename")).font(Tokens::semibold(12.5)).desired_width(fr.width()));
+        app.auto.add_response("merlin.chats.rename", &resp, "Chat name");
+        resp.request_focus();
+        let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if enter {
+            acts.push(Act::Rename(draft));
+        } else if !esc && !resp.lost_focus() {
+            app.ui.merlin.rt.rename = Some(draft);
+        }
+        return;
+    }
+    let title = native::chat_title(&app.ui.merlin);
+    let mut job = LayoutJob::simple_singleline(title.clone(), Tokens::semibold(13.0), t.text);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((max_w - 26.0).max(10.0));
+    let g = ui.painter().layout_job(job);
+    let br = Rect::from_min_size(pos2(left, cy - 12.0), vec2(g.size().x + 26.0, 24.0));
+    let resp = ui.interact(br, egui::Id::unique("merlin-chats"), Sense::click());
+    let open = app.ui.merlin.rt.chats_open;
+    let hot = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || open, 0.12);
+    if hot > 0.0 {
+        ui.painter().rect_filled(br, 6.0, t.hover.gamma_multiply(hot));
+    }
+    ui.painter().galley(pos2(br.min.x + 6.0, cy - g.size().y / 2.0), g, t.text);
+    icons::paint(ui.painter(), Rect::from_center_size(pos2(br.max.x - 10.0, cy), vec2(9.0, 9.0)), Icon::ChevronDown, t.text_faint);
+    app.auto.add("merlin.chats", br, "Chats");
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.double_clicked() {
+        app.ui.merlin.rt.rename = Some(app.ui.merlin.rt.chat.title.clone());
+        app.ui.merlin.rt.chats_open = false;
+    } else if resp.on_hover_text(tr("Chats: switch, start or delete · double-click to rename")).clicked() {
+        acts.push(Act::ToggleChats);
+    }
+    if open {
+        chat_menu(app, ui, br, look, acts);
+    }
+}
+
+/// The chat list under the chat's name: New chat, then the chats, most recent first.
+fn chat_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, anchor: Rect, look: &Look, acts: &mut Vec<Act>) {
+    let t = look.t;
+    let busy = app.ui.merlin.busy;
+    let rows = native::chat_rows(&app.ui.merlin);
+    let panel = ui.max_rect();
+    let width = (panel.width() - 16.0).clamp(160.0, 300.0);
+    // Under the name, kept inside the panel.
+    let x = anchor.min.x.min(panel.max.x - 8.0 - width).max(panel.min.x + 8.0);
+    let confirm = app.ui.merlin.rt.confirm_delete;
+    let EffectcraftApp { auto, .. } = app;
+    let area =
+        egui::Area::new(egui::Id::unique("merlin-chat-menu")).order(egui::Order::Foreground).fixed_pos(pos2(x, anchor.max.y + 4.0)).show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(look.card)
+                .stroke(Stroke::new(1.0, look.border))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(4))
+                .shadow(ui.style().visuals.popup_shadow)
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    let row = |ui: &mut egui::Ui| {
+                        let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), if busy { Sense::hover() } else { Sense::click() });
+                        if resp.hovered() && !busy {
+                            ui.painter().rect_filled(r, 5.0, t.hover);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        (r, resp)
+                    };
+                    let (r, resp) = row(ui);
+                    icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 12.0, r.center().y), vec2(11.0, 11.0)), Icon::Plus, look.magic);
+                    ui.painter().text(pos2(r.min.x + 26.0, r.center().y), Align2::LEFT_CENTER, tr("New chat"), Tokens::medium(12.0), t.text);
+                    auto.add("merlin.chats.new", r, "New chat");
+                    if resp.clicked() {
+                        acts.push(Act::NewChat);
+                    }
+                    if !rows.is_empty() {
+                        ui.add_space(3.0);
+                        let (sep, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+                        ui.painter().line_segment([sep.left_center(), sep.right_center()], Stroke::new(1.0, t.separator));
+                        ui.add_space(3.0);
+                    }
+                    for (id, title, updated, notes, open) in &rows {
+                        let (r, resp) = row(ui);
+                        let cy = r.center().y;
+                        if *open {
+                            ui.painter().circle_filled(pos2(r.min.x + 12.0, cy), 3.0, look.magic);
+                        }
+                        // Right: when, open notes, ×.
+                        let x_r = Rect::from_center_size(pos2(r.max.x - 12.0, cy), vec2(18.0, 18.0));
+                        let asking = confirm == Some(*id);
+                        let mut meta = native::ago(*updated);
+                        if *notes > 0 {
+                            meta = format!("{} · {meta}", tr_args("{} notes", &[notes]));
+                        }
+                        let mg = ui.painter().layout_no_wrap(meta, Tokens::ui(10.5), t.text_faint);
+                        let meta_x = x_r.min.x - 6.0 - mg.size().x;
+                        let mut job = LayoutJob::simple_singleline(title.clone(), Tokens::ui(12.0), if *open { t.text } else { t.text_dim });
+                        job.wrap = egui::text::TextWrapping::truncate_at_width((meta_x - r.min.x - 30.0).max(10.0));
+                        let g = ui.painter().layout_job(job);
+                        ui.painter().galley(pos2(r.min.x + 24.0, cy - g.size().y / 2.0), g, t.text);
+                        if !asking {
+                            ui.painter().galley(pos2(meta_x, cy - mg.size().y / 2.0), mg, t.text_faint);
+                        }
+                        auto.add(&format!("merlin.chats.{id}"), r, title);
+                        // Delete asks once ("Delete?") before it deletes.
+                        let del = if asking {
+                            let dg = ui.painter().layout_no_wrap(tr("Delete?").to_string(), Tokens::medium(11.0), t.danger);
+                            let dr = Rect::from_min_max(pos2(x_r.max.x - dg.size().x - 8.0, r.min.y + 3.0), pos2(x_r.max.x, r.max.y - 3.0));
+                            let d = ui.interact(dr, egui::Id::unique(("merlin-chat-del", *id)), Sense::click());
+                            ui.painter().rect_filled(dr, 4.0, t.danger.gamma_multiply(if d.hovered() { 0.25 } else { 0.12 }));
+                            ui.painter().galley(pos2(dr.min.x + 4.0, cy - dg.size().y / 2.0), dg, t.danger);
+                            auto.add(&format!("merlin.chats.{id}.delete"), dr, "Delete chat");
+                            d
+                        } else {
+                            let d = icon_btn(ui, x_r, Icon::Close, false, !busy, look, &format!("chat-del-{id}"));
+                            auto.add(&format!("merlin.chats.{id}.delete"), x_r, "Delete chat");
+                            d.on_hover_text(tr("Delete chat"))
+                        };
+                        if del.clicked() && !busy {
+                            if asking {
+                                acts.push(Act::DeleteChat(*id));
+                            } else {
+                                acts.push(Act::AskDelete(*id));
+                            }
+                        } else if resp.clicked() && !del.hovered() {
+                            acts.push(Act::OpenChat(*id));
+                        }
+                    }
+                });
+        });
+    // A click elsewhere or Escape closes it.
+    let menu = area.response.rect;
+    let (pressed, at, esc) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
+    if esc || (pressed && at.is_some_and(|p| !menu.contains(p) && !anchor.contains(p))) {
+        app.ui.merlin.rt.chats_open = false;
+        app.ui.merlin.rt.confirm_delete = None;
+    }
 }
 
 // ------------------------------------------------------------------ conversation

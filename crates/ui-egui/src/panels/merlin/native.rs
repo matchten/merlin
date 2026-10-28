@@ -172,6 +172,16 @@ pub(crate) struct Runtime {
     /// What was last saved, and when the panel last checked.
     saved_fingerprint: u64,
     last_save_check: f64,
+    /// The project's other chats (the open one lives in the panel), and the open one's title and
+    /// times; `chats_rev` changes whenever the list does (so it's saved).
+    pub(super) chats: Vec<StoredChat>,
+    pub(super) chat: ChatMeta,
+    chats_rev: u64,
+    /// The chat menu is open; the chat whose delete waits for a second click; the open chat's name
+    /// being edited.
+    pub(super) chats_open: bool,
+    pub(super) confirm_delete: Option<u64>,
+    pub(super) rename: Option<String>,
     /// The conversation as last shared with the save thread, and its length then.
     saved_conversation: Option<(usize, Arc<Vec<Message>>)>,
     /// Each conversation item's height when last drawn, and the width it was drawn at: items
@@ -665,6 +675,18 @@ pub fn attach_paths(app: &mut EffectcraftApp, ctx: &egui::Context, paths: Vec<St
 ///   added to the library (replacing one of the same name) and made the project's;
 /// * `style`: the name of the project's kit (`""` for none).
 pub fn apply_ui_set(app: &mut EffectcraftApp, ctx: &egui::Context, v: &Value) -> Result<(), String> {
+    if v.get("newChat").and_then(Value::as_bool) == Some(true) {
+        new_chat(app);
+    }
+    if let Some(id) = v.get("openChat").and_then(Value::as_u64) {
+        open_chat(app, id)?;
+    }
+    if let Some(id) = v.get("deleteChat").and_then(Value::as_u64) {
+        delete_chat(app, id);
+    }
+    if let Some(t) = v.get("chatTitle").and_then(Value::as_str) {
+        rename_chat(app, t);
+    }
     if let Some(k) = v.get("styleKit") {
         let kit: merlin_agent::style::StyleKit = serde_json::from_value(k.clone()).map_err(|e| format!("merlin.styleKit: {e}"))?;
         if kit.name.trim().is_empty() {
@@ -933,6 +955,7 @@ fn tool_item<'a>(items: &'a mut [ChatItem], call: &str) -> Option<&'a mut ChatIt
 fn finish_turn(app: &mut EffectcraftApp, w: Worker, outcome: Option<TurnOutcome>, conversation: Option<Vec<Message>>) {
     let label = turn_label(&w.request);
     let changed = w.checkpoint.collapse(&mut app.session, &label);
+    app.ui.merlin.rt.chat.updated = now_secs();
     let (text, error) = match outcome.as_ref().map(|o| &o.end) {
         Some(TurnEnd::Done) => (tr("Done"), None::<String>),
         Some(TurnEnd::Cancelled) => (tr("Stopped"), None),
@@ -1056,6 +1079,9 @@ pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
     let rt = &mut app.ui.merlin.rt;
     rt.hover_note = rt.hover_next.take();
+    if rt.chat.id == 0 {
+        fresh_meta(rt);
+    }
     take_attachments(app, ctx);
     super::frames::take_snapshots(app, ctx);
     sync_chat(app, now);
@@ -1156,6 +1182,179 @@ struct SavedChat {
     style: String,
 }
 
+/// A chat's name and when it was made and last used (Unix seconds).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ChatMeta {
+    pub(super) id: u64,
+    /// Given by the user; empty: the first message names it.
+    pub(super) title: String,
+    pub(super) created: i64,
+    pub(super) updated: i64,
+}
+
+/// One of the project's other chats: its name, and the chat as saved (JSON, read only when it's
+/// opened).
+#[derive(Clone)]
+pub(crate) struct StoredChat {
+    pub(super) meta: ChatMeta,
+    data: Arc<String>,
+}
+
+fn now_secs() -> i64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Give the open chat a new id and today's times.
+fn fresh_meta(rt: &mut Runtime) {
+    let id = rt.chats.iter().map(|c| c.meta.id).max().unwrap_or(0).max(rt.chat.id).saturating_add(1);
+    let now = now_secs();
+    rt.chat = ChatMeta { id, title: String::new(), created: now, updated: now };
+}
+
+/// A chat's name from its first message (its first line, shortened).
+fn auto_title(items: &[ChatItem]) -> Option<String> {
+    items.iter().find_map(|i| match i {
+        ChatItem::User { text, .. } => text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| super::view::short(l, 40)),
+        _ => None,
+    })
+}
+
+/// The open chat's name.
+pub(super) fn chat_title(panel: &super::MerlinPanel) -> String {
+    if !panel.rt.chat.title.trim().is_empty() {
+        return panel.rt.chat.title.trim().to_string();
+    }
+    auto_title(&panel.items).unwrap_or_else(|| tr("New chat").to_string())
+}
+
+/// The open chat has nothing in it yet.
+fn is_blank(panel: &super::MerlinPanel) -> bool {
+    panel.items.is_empty() && panel.notes.is_empty()
+}
+
+/// The open chat as saved, to keep while another one is open (`None` when it's empty).
+fn stash_open(app: &mut EffectcraftApp) -> Option<StoredChat> {
+    let p = &app.ui.merlin;
+    if is_blank(p) {
+        return None;
+    }
+    let note_frames =
+        p.rt.frames
+            .iter()
+            .filter(|(k, _)| k.starts_with("note-"))
+            .filter_map(|(k, v)| v.first().map(|png| (k.clone(), merlin_agent::base64::encode(png))))
+            .collect();
+    let saved = SavedChatRef { version: 1, items: &p.items, notes: &p.notes, conversation: &p.rt.conversation, note_frames, style: &p.active_style };
+    let data = serde_json::to_string(&saved).ok()?;
+    let mut meta = p.rt.chat.clone();
+    meta.title = chat_title(p);
+    Some(StoredChat { meta, data: Arc::new(data) })
+}
+
+/// Open a stored chat in the (cleared) panel; false when it can't be read.
+fn open_stored(app: &mut EffectcraftApp, chat: StoredChat) -> bool {
+    let Ok(saved) = serde_json::from_str::<SavedChat>(&chat.data) else { return false };
+    apply_saved(app, saved);
+    app.ui.merlin.rt.chat = chat.meta;
+    true
+}
+
+/// New Chat: keep the open chat in the list and start an empty one (an empty chat stays as it is).
+/// Not while a turn runs.
+pub(super) fn new_chat(app: &mut EffectcraftApp) {
+    if app.ui.merlin.rt.worker.is_some() || is_blank(&app.ui.merlin) {
+        return;
+    }
+    let stashed = stash_open(app);
+    clear_open(app);
+    let rt = &mut app.ui.merlin.rt;
+    rt.chats.extend(stashed);
+    fresh_meta(rt);
+    rt.chats_rev += 1;
+    rt.chats_open = false;
+}
+
+/// Open chat `id` from the list, keeping the open one.
+pub(super) fn open_chat(app: &mut EffectcraftApp, id: u64) -> Result<(), String> {
+    if app.ui.merlin.rt.worker.is_some() {
+        return Err("Merlin is working; stop the turn first".into());
+    }
+    if app.ui.merlin.rt.chat.id == id {
+        app.ui.merlin.rt.chats_open = false;
+        return Ok(());
+    }
+    let rt = &app.ui.merlin.rt;
+    let pos = rt.chats.iter().position(|c| c.meta.id == id).ok_or_else(|| format!("no chat {id}"))?;
+    let Some(target) = rt.chats.get(pos).cloned() else { return Err(format!("no chat {id}")) };
+    if serde_json::from_str::<Value>(&target.data).is_err() {
+        return Err(tr("That chat couldn't be read.").to_string());
+    }
+    let stashed = stash_open(app);
+    clear_open(app);
+    let rt = &mut app.ui.merlin.rt;
+    rt.chats.retain(|c| c.meta.id != id);
+    rt.chats.extend(stashed);
+    if !open_stored(app, target) {
+        fresh_meta(&mut app.ui.merlin.rt);
+    }
+    let rt = &mut app.ui.merlin.rt;
+    rt.chats_rev += 1;
+    rt.chats_open = false;
+    rt.confirm_delete = None;
+    Ok(())
+}
+
+/// Delete chat `id`. Deleting the open one opens the most recent other (or an empty chat).
+pub(super) fn delete_chat(app: &mut EffectcraftApp, id: u64) {
+    if app.ui.merlin.rt.worker.is_some() {
+        return;
+    }
+    if app.ui.merlin.rt.chat.id == id {
+        clear_open(app);
+        let rt = &mut app.ui.merlin.rt;
+        let latest = rt.chats.iter().enumerate().max_by_key(|(_, c)| c.meta.updated).map(|(i, _)| i);
+        let next = latest.map(|i| rt.chats.remove(i));
+        if !next.is_some_and(|c| open_stored(app, c)) {
+            fresh_meta(&mut app.ui.merlin.rt);
+        }
+    } else {
+        app.ui.merlin.rt.chats.retain(|c| c.meta.id != id);
+    }
+    let rt = &mut app.ui.merlin.rt;
+    rt.chats_rev += 1;
+    rt.confirm_delete = None;
+}
+
+/// Name the open chat (empty: named by its first message again).
+pub(super) fn rename_chat(app: &mut EffectcraftApp, title: &str) {
+    let rt = &mut app.ui.merlin.rt;
+    rt.chat.title = title.trim().to_string();
+    rt.chats_rev += 1;
+}
+
+/// The chat menu's rows, most recently used first: id, name, last used, open notes, open.
+pub(super) fn chat_rows(panel: &super::MerlinPanel) -> Vec<(u64, String, i64, usize, bool)> {
+    let open_notes = panel.notes.iter().filter(|n| n.status == NoteStatus::Open).count();
+    let mut rows: Vec<_> = panel.rt.chats.iter().map(|c| (c.meta.id, c.meta.title.clone(), c.meta.updated, 0, false)).collect();
+    if !is_blank(panel) || rows.is_empty() {
+        rows.push((panel.rt.chat.id, chat_title(panel), panel.rt.chat.updated, open_notes, true));
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse((r.4 && is_blank(panel), r.2, r.0)));
+    rows
+}
+
+/// "now", "5 min", "2 h", "3 d" since `then` (Unix seconds).
+pub(super) fn ago(then: i64) -> String {
+    let d = now_secs().saturating_sub(then).max(0);
+    match d {
+        0..60 => tr("now").to_string(),
+        60..3600 => tr_args("{} min", &[&(d / 60)]),
+        3600..86_400 => tr_args("{} h", &[&(d / 3600)]),
+        _ => tr_args("{} d", &[&(d / 86_400)]),
+    }
+}
+
 fn chat_path(project: &str) -> std::path::PathBuf {
     std::path::Path::new(project).with_extension("merlin.json")
 }
@@ -1165,36 +1364,53 @@ fn fingerprint(panel: &super::MerlinPanel) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     serde_json::to_string(&(&panel.items, &panel.notes, &panel.active_style)).unwrap_or_default().hash(&mut h);
     panel.rt.conversation.len().hash(&mut h);
+    (panel.rt.chats_rev, panel.rt.chat.id, &panel.rt.chat.title).hash(&mut h);
     h.finish()
 }
 
-/// Write the chat for `project` (in the background). An empty chat removes a saved one.
+/// Write the chats for `project` (in the background): version 2, the open chat and the others.
+/// No chats removes a saved file.
 fn save_chat(app: &mut EffectcraftApp, project: &str) {
     let panel = &app.ui.merlin;
     let path = chat_path(project);
-    if panel.items.is_empty() && panel.notes.is_empty() && panel.active_style == panel.settings.style {
+    let blank = is_blank(panel);
+    if blank && panel.rt.chats.is_empty() && panel.active_style == panel.settings.style {
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
         return;
     }
-    // Only cheap copies here: the conversation (with its images) is shared, and the encoding and
-    // writing happen on the save thread.
+    // Only cheap copies here: the conversation (with its images) and the other chats are shared,
+    // and the encoding and writing happen on the save thread.
     let frames: Vec<(String, Vec<u8>)> =
         panel.rt.frames.iter().filter(|(k, _)| k.starts_with("note-")).filter_map(|(k, v)| v.first().map(|png| (k.clone(), png.clone()))).collect();
+    let others: Vec<(ChatMeta, Arc<String>)> = panel.rt.chats.iter().map(|c| (c.meta.clone(), c.data.clone())).collect();
+    let mut meta = panel.rt.chat.clone();
+    if meta.title.is_empty() {
+        meta.title = auto_title(&panel.items).unwrap_or_default();
+    }
     let conversation = shared_conversation(&mut app.ui.merlin.rt);
     let panel = &app.ui.merlin;
     let (items, notes, style) = (panel.items.clone(), panel.notes.clone(), panel.active_style.clone());
     let _ = std::thread::Builder::new().name("merlin-save".into()).spawn(move || {
-        let note_frames = frames.into_iter().map(|(k, png)| (k, merlin_agent::base64::encode(&png))).collect();
-        let saved = SavedChatRef { version: 1, items: &items, notes: &notes, conversation: &conversation, note_frames, style: &style };
-        let text = match serde_json::to_string(&saved) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("Merlin chat: {e}");
-                return;
+        let entry = |meta: &ChatMeta, chat: &str| serde_json::to_string(meta).map(|m| format!("{{\"meta\":{m},\"chat\":{chat}}}"));
+        let mut chats = vec![];
+        for (m, data) in &others {
+            chats.extend(entry(m, data).ok());
+        }
+        if !blank {
+            let note_frames = frames.into_iter().map(|(k, png)| (k, merlin_agent::base64::encode(&png))).collect();
+            let saved = SavedChatRef { version: 1, items: &items, notes: &notes, conversation: &conversation, note_frames, style: &style };
+            match serde_json::to_string(&saved).and_then(|c| entry(&meta, &c)) {
+                Ok(e) => chats.push(e),
+                Err(e) => {
+                    log::warn!("Merlin chat: {e}");
+                    return;
+                }
             }
-        };
+        }
+        let style = serde_json::to_string(&style).unwrap_or_else(|_| "\"\"".into());
+        let text = format!("{{\"version\":2,\"active\":{},\"style\":{style},\"chats\":[{}]}}", meta.id, chats.join(","));
         let tmp = path.with_extension("merlin.json.tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -1227,14 +1443,14 @@ struct SavedChatRef<'a> {
     style: &'a str,
 }
 
-/// Start the panel over for another project (its notes, chat and conversation).
-fn reset_chat(app: &mut EffectcraftApp) {
+/// Clear the open chat (its messages, notes, pins, conversation and frames); the other chats,
+/// the style kit and the attachments being written stay.
+fn clear_open(app: &mut EffectcraftApp) {
     let p = &mut app.ui.merlin;
     p.items.clear();
     p.notes.clear();
     p.pins.clear();
     p.open_notes.clear();
-    p.active_style = p.settings.style.clone();
     p.rt.stretching = None;
     p.marking_note = None;
     p.rt.snap_at.clear();
@@ -1246,23 +1462,66 @@ fn reset_chat(app: &mut EffectcraftApp) {
     p.rt.md_cache.clear();
     p.rt.frames.retain(|k, _| k.starts_with("att:"));
     p.rt.textures.clear();
+    p.rt.decoding.clear();
 }
 
-/// Load the chat saved for `project`, if any.
+/// Start the panel over for another project: no chats yet, the default style kit.
+fn reset_chat(app: &mut EffectcraftApp) {
+    clear_open(app);
+    let p = &mut app.ui.merlin;
+    p.active_style = p.settings.style.clone();
+    p.rt.chats.clear();
+    p.rt.chat = ChatMeta::default();
+    p.rt.chats_rev += 1;
+}
+
+/// Load the chats saved for `project`, if any, opening the one that was open.
 fn load_chat(app: &mut EffectcraftApp, project: &str) {
     let Ok(text) = std::fs::read_to_string(chat_path(project)) else { return };
-    let Ok(saved) = serde_json::from_str::<SavedChat>(&text) else {
-        app.ui.status = tr("The saved Merlin chat for this project couldn't be read; starting a new one.").to_string();
-        return;
-    };
+    let unreadable = |app: &mut EffectcraftApp| app.ui.status = tr("The saved Merlin chat for this project couldn't be read; starting a new one.").to_string();
+    let Ok(v) = serde_json::from_str::<Value>(&text) else { return unreadable(app) };
+    let style = v.get("style").and_then(Value::as_str).unwrap_or_default().to_string();
+    if let Some(list) = v.get("chats").and_then(Value::as_array) {
+        // Version 2: several chats; the others stay as text until they're opened.
+        let active = v.get("active").and_then(Value::as_u64).unwrap_or(0);
+        let mut open = None;
+        for c in list {
+            let Some(meta) = c.get("meta").and_then(|m| serde_json::from_value::<ChatMeta>(m.clone()).ok()) else { continue };
+            let Some(chat) = c.get("chat") else { continue };
+            if meta.id == active && open.is_none() {
+                open = serde_json::from_value::<SavedChat>(chat.clone()).ok().map(|s| (meta, s));
+            } else {
+                app.ui.merlin.rt.chats.push(StoredChat { meta, data: Arc::new(chat.to_string()) });
+            }
+        }
+        match open {
+            Some((meta, saved)) => {
+                apply_saved(app, saved);
+                app.ui.merlin.rt.chat = meta;
+            }
+            None => fresh_meta(&mut app.ui.merlin.rt),
+        }
+    } else {
+        // Version 1: one chat.
+        let Ok(saved) = serde_json::from_value::<SavedChat>(v) else { return unreadable(app) };
+        apply_saved(app, saved);
+        fresh_meta(&mut app.ui.merlin.rt);
+    }
+    let p = &mut app.ui.merlin;
+    if p.rt.kits.iter().any(|k| k.name == style) {
+        p.active_style = style;
+    }
+    p.rt.chats_rev += 1;
+    p.rt.saved_fingerprint = fingerprint(p);
+}
+
+/// Open a saved chat in the panel (which was cleared).
+fn apply_saved(app: &mut EffectcraftApp, saved: SavedChat) {
     let p = &mut app.ui.merlin;
     p.items = saved.items;
     p.rt.item_h.clear();
     p.rt.md_cache.clear();
     p.notes = saved.notes;
-    if p.rt.kits.iter().any(|k| k.name == saved.style) {
-        p.active_style = saved.style;
-    }
     // Undo history isn't saved: past turns can't be reverted any more, notes in flight reopen.
     for it in &mut p.items {
         match it {
@@ -1307,7 +1566,6 @@ fn load_chat(app: &mut EffectcraftApp, project: &str) {
         }
     }
     p.rt.conversation = saved.conversation;
-    p.rt.saved_fingerprint = fingerprint(p);
 }
 
 /// Keep the chat with its project: load it when another project opens, save it as it changes.
@@ -1359,21 +1617,6 @@ fn sync_chat(app: &mut EffectcraftApp, now: f64) {
 }
 
 // ------------------------------------------------------------------ view support
-
-/// Start over (not while a turn runs): the attachments being written stay.
-pub(super) fn new_chat(app: &mut EffectcraftApp) {
-    if app.ui.merlin.rt.worker.is_some() {
-        return;
-    }
-    let p = &mut app.ui.merlin;
-    p.items.clear();
-    p.rt.conversation.clear();
-    p.rt.appear.clear();
-    p.rt.item_h.clear();
-    p.rt.md_cache.clear();
-    p.rt.frames.retain(|k, _| p.attachments.iter().any(|a| *k == format!("att:{}", a.path)));
-    p.rt.textures.clear();
-}
 
 pub(super) fn unattach(app: &mut EffectcraftApp, i: usize) {
     let p = &mut app.ui.merlin;
@@ -1455,6 +1698,11 @@ impl super::MerlinPanel {
     /// How many conversation items were laid out last frame (the rest were scrolled out of view).
     pub fn drawn_items(&self) -> usize {
         self.rt.drawn_items
+    }
+
+    /// The project's chats as the menu lists them: id, name, open.
+    pub fn chat_list(&self) -> Vec<(u64, String, bool)> {
+        chat_rows(self).into_iter().map(|(id, title, _, _, open)| (id, title, open)).collect()
     }
 
     /// Whether an image is kept under `key` (`note-snap-end:3`, `turn-after:1`).

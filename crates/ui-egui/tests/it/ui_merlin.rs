@@ -1018,3 +1018,138 @@ fn merlin_notes_snapshot() {
     std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
     h.render().expect("render").save(out).unwrap();
 }
+
+/// New Chat keeps the chat it leaves: the menu opens it again with its messages and notes, a chat
+/// can be renamed and deleted, an empty chat doesn't pile up, and the chats are saved with the
+/// project (an older one-chat file still opens).
+#[test]
+fn new_chat_keeps_the_old_one_in_the_chat_menu() {
+    let mut h = harness();
+    board(&mut h);
+    let d = temp_dir("chats");
+    let proj = d.join("Board.ecproj");
+    let file = d.join("Board.merlin.json");
+    let _ = std::fs::remove_file(&file);
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    let ctx = h.ctx.clone();
+    let set = effectcraft_ui_egui::panels::merlin::apply_ui_set;
+    let send = |h: &mut Harness<'_, EffectcraftApp>, text: &str| {
+        h.state_mut().ui.merlin.input = text.into();
+        h.run_steps(1);
+        click(h, "merlin.send");
+        wait_idle(h);
+        let Some(ChatItem::Turn { id, .. }) = h.state().ui.merlin.items.last().cloned() else { panic!("no turn card") };
+        // A turn that changed something asks Keep / Revert.
+        if h.state().auto.find(&format!("merlin.turn.{id}.keep")).is_some() {
+            click(h, &format!("merlin.turn.{id}.keep"));
+        }
+    };
+    set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 1.0, "text": "warmer"}})).unwrap();
+    send(&mut h, "Make a lower third");
+    let first_items = h.state().ui.merlin.items.len();
+    let list = h.state().ui.merlin.chat_list();
+    assert_eq!(list.len(), 1);
+    let (first, title, _) = list[0].clone();
+    assert_eq!(title, "Make a lower third", "named by its first message");
+
+    // New chat: empty, notes numbered from 1 again; the first stays in the list.
+    click(&mut h, "merlin.newChat");
+    assert!(h.state().ui.merlin.items.is_empty() && h.state().ui.merlin.notes.is_empty());
+    assert_eq!(h.state().ui.merlin.chat_list().len(), 1, "the empty new chat isn't listed yet");
+    click(&mut h, "merlin.newChat");
+    assert_eq!(h.state().ui.merlin.chat_list().len(), 1, "+ on an empty chat adds nothing");
+    set(h.state_mut(), &ctx, &serde_json::json!({"note": {"time": 0.5, "text": "cooler"}})).unwrap();
+    assert_eq!(h.state().ui.merlin.notes[0].id, 1);
+    send(&mut h, "Kinetic type");
+    let list = h.state().ui.merlin.chat_list();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].2 && list[0].1 == "Kinetic type", "the open chat is the most recent: {list:?}");
+    let second = list[0].0;
+
+    // The menu opens the first chat again, with its notes and their frames.
+    click(&mut h, "merlin.chats");
+    // The menu sizes itself on its first frame.
+    h.run_steps(3);
+    click(&mut h, &format!("merlin.chats.{first}"));
+    assert_eq!(h.state().ui.merlin.items.len(), first_items);
+    assert_eq!(h.state().ui.merlin.notes.len(), 1);
+    assert_eq!(h.state().ui.merlin.notes[0].text, "warmer");
+    assert!(!h.state().ui.merlin.chat_list().iter().find(|c| c.0 == second).unwrap().2);
+
+    // Renamed through the control channel (the menu's double-click does the same).
+    set(h.state_mut(), &ctx, &serde_json::json!({"chatTitle": "Lower third v1"})).unwrap();
+    assert!(h.state().ui.merlin.chat_list().iter().any(|c| c.1 == "Lower third v1" && c.2));
+
+    // Saved with the project, both chats; reopening brings back the open one and the list.
+    for _ in 0..600 {
+        h.run_steps(1);
+        if std::fs::read_to_string(&file).is_ok_and(|t| t.contains("Lower third v1") && t.contains("Kinetic type")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(&file).expect("saved next to the project");
+    assert!(text.contains("\"version\":2"), "{}", &text[..text.len().min(200)]);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["chats"].as_array().map(Vec::len), Some(2));
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().ui.merlin.chat_list().iter().all(|c| c.2), "another project starts with no chats");
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": proj.to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    let list = h.state().ui.merlin.chat_list();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert!(list.iter().any(|c| c.1 == "Lower third v1" && c.2));
+    assert_eq!(h.state().ui.merlin.notes[0].text, "warmer");
+
+    // Delete the other chat: × asks, a second click deletes.
+    click(&mut h, "merlin.chats");
+    // The menu sizes itself on its first frame.
+    h.run_steps(3);
+    click(&mut h, &format!("merlin.chats.{second}.delete"));
+    assert_eq!(h.state().ui.merlin.chat_list().len(), 2, "asks first");
+    h.run_steps(1);
+    click(&mut h, &format!("merlin.chats.{second}.delete"));
+    assert_eq!(h.state().ui.merlin.chat_list().len(), 1);
+
+    // A version 1 file (one chat) still opens.
+    let v1 = d.join("Old.ecproj");
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": v1.to_string_lossy()})).unwrap();
+    h.run_steps(2);
+    std::fs::write(
+        d.join("Old.merlin.json"),
+        r#"{"version":1,"items":[{"kind":"notice","text":"from v1","error":false}],"notes":[],"conversation":[],"noteFrames":{},"style":""}"#,
+    )
+    .unwrap();
+    h.state_mut().session.execute("file.saveAs", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": d.join("Other.ecproj").to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    h.state_mut().session.execute("file.open", serde_json::json!({"path": v1.to_string_lossy()})).unwrap();
+    h.run_steps(3);
+    assert!(matches!(h.state().ui.merlin.items.first(), Some(ChatItem::Notice { text, .. }) if text == "from v1"), "{:?}", h.state().ui.merlin.items);
+}
+
+/// A picture of the chat menu (`cargo test -p effectcraft-ui-egui --test it merlin_chats_snapshot -- --ignored`).
+#[test]
+#[ignore]
+fn merlin_chats_snapshot() {
+    let mut h = harness();
+    board(&mut h);
+    for text in ["Make a lower third for Ada Lovelace", "Kinetic typography that says Ship it"] {
+        h.state_mut().ui.merlin.input = text.into();
+        h.run_steps(1);
+        click(&mut h, "merlin.send");
+        wait_idle(&mut h);
+        click(&mut h, "merlin.newChat");
+    }
+    h.state_mut().ui.merlin.input = "A title that drops in with a bounce".into();
+    h.run_steps(1);
+    click(&mut h, "merlin.send");
+    wait_idle(&mut h);
+    click(&mut h, "merlin.chats");
+    h.run_steps(4);
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-chats.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    h.render().expect("render").save(out).unwrap();
+}
