@@ -12,9 +12,10 @@ use serde_json::Value;
 
 use super::frames;
 use super::native;
-use super::note_tabs::AMBER;
+use super::note_tabs;
 use crate::EffectcraftApp;
 use crate::dock::PanelKind;
+use crate::i18n::tr_args;
 use crate::panels::timeline::TMap;
 
 /// Before the shortcuts run (each frame): `@` starts a note; while one is being stretched, Shift+←/→
@@ -76,12 +77,17 @@ fn stretch(app: &mut EffectcraftApp, ctx: &egui::Context) {
         app.session.set_time(fr.tick_of(f.clamp(0, last_frame)));
     }
     let now = app.session.time();
+    let clock = app.now();
     if now != last {
         if let Some(n) = app.ui.merlin.notes.iter_mut().find(|n| n.id == id) {
             n.start = anchor.min(now);
             n.end = (now != anchor).then_some(anchor.max(now));
         }
         app.ui.merlin.rt.stretching = Some((id, anchor, now));
+        app.ui.merlin.rt.stretch_moved = clock;
+    } else if clock - app.ui.merlin.rt.stretch_moved >= SNAP_REST_SECS {
+        // The playhead rested: render the frame(s) now, so they're there when the note opens.
+        frames::request_snapshot(app, id);
     }
     if enter {
         finish(app, id, true);
@@ -94,8 +100,11 @@ fn stretch(app: &mut EffectcraftApp, ctx: &egui::Context) {
             frames::request_snapshot(app, id);
         }
     }
-    ctx.request_repaint();
+    super::view::tick(ctx);
 }
+
+/// How long the playhead rests while stretching before the note's frames render.
+const SNAP_REST_SECS: f64 = 0.15;
 
 /// Done stretching: snapshot the frame(s) and (`write`) open the note for typing.
 fn finish(app: &mut EffectcraftApp, id: u64, write: bool) {
@@ -107,46 +116,58 @@ fn finish(app: &mut EffectcraftApp, id: u64, write: bool) {
     }
 }
 
-/// Notes on the Timeline's ruler (`strip`: the marker strip along its bottom): pins at a note's
-/// frame, bars over a range, glowing while stretched; a click opens the note in the panel.
+/// Notes on the Timeline's ruler (`strip`: the marker strip along its bottom): a numbered pin in
+/// each note's colour at its frame and a thin bar over a range, washed over only while the note is
+/// stretched, open or under the pointer; a click opens the note in the panel.
 pub(crate) fn ruler_notes(app: &mut EffectcraftApp, ui: &mut egui::Ui, tm: &TMap, strip: Rect) {
     let Some(cid) = app.session.active_comp_id() else { return };
-    let look_magic = egui::Color32::from_rgb(0xa7, 0x8b, 0xfa);
-    let notes: Vec<_> = app.ui.merlin.notes.iter().filter(|n| n.comp == cid.0 && !n.status.is_done()).cloned().collect();
-    if notes.is_empty() {
+    let panel = &app.ui.merlin;
+    if !panel.notes.iter().any(|n| n.comp == cid.0 && !n.status.is_done()) {
         return;
     }
-    let stretching = app.ui.merlin.rt.stretching.map(|s| s.0);
-    let p = ui.painter().with_clip_rect(strip.expand2(vec2(0.0, 2.0)).intersect(ui.clip_rect()));
+    let magic = egui::Color32::from_rgb(0xa7, 0x8b, 0xfa);
+    let stretching = panel.rt.stretching.map(|s| s.0);
+    let clip = strip.intersect(ui.clip_rect());
+    let p = ui.painter().with_clip_rect(clip);
     let now = app.now();
     let mut clicked = None;
-    for n in &notes {
-        let col = if n.author == merlin_agent::notes::Author::Merlin { look_magic } else { AMBER };
+    let mut hovered = None;
+    for n in panel.notes.iter().filter(|n| n.comp == cid.0 && !n.status.is_done()) {
+        let base = if n.author == merlin_agent::notes::Author::Merlin { magic } else { note_tabs::hue(n.id) };
         let glow = if stretching == Some(n.id) { 0.6 + 0.4 * (0.5 + 0.5 * (now * 5.0).sin()) as f32 } else { 1.0 };
-        let col = col.gamma_multiply(glow);
+        let sent = n.status == NoteStatus::Sent;
+        let col = base.gamma_multiply(glow * if sent { 0.5 } else { 1.0 });
+        let lit = stretching == Some(n.id) || panel.open_notes.contains(&n.id) || panel.rt.hover_note == Some(n.id);
         let (s, e) = n.span();
         let (x0, x1) = (tm.x(s.seconds()), tm.x(e.seconds()));
         if e > s {
-            let bar = Rect::from_min_max(pos2(x0, strip.max.y - 5.0), pos2(x1.max(x0 + 2.0), strip.max.y - 1.0));
-            p.rect_filled(Rect::from_min_max(pos2(bar.min.x, strip.min.y), pos2(bar.max.x, strip.max.y)), 0.0, col.gamma_multiply(0.15));
-            p.rect_filled(bar, 2.0, col);
+            if lit {
+                p.rect_filled(Rect::from_min_max(pos2(x0, strip.min.y), pos2(x1, strip.max.y)), 0.0, base.gamma_multiply(0.14));
+            }
+            p.rect_filled(Rect::from_min_max(pos2(x0, strip.max.y - 3.0), pos2(x1.max(x0 + 2.0), strip.max.y)), 1.5, col);
         }
-        let head = pos2(x0, strip.min.y + 4.0);
-        p.line_segment([head, pos2(x0, strip.max.y)], Stroke::new(1.5, col));
-        p.circle_filled(head, 3.5, col);
-        let hit = Rect::from_center_size(pos2(x0, strip.center().y), vec2(10.0, strip.height().max(10.0)));
+        let r = (strip.height() * 0.32).clamp(4.5, 6.5);
+        let head = pos2(x0, strip.min.y + r + 0.5);
+        p.line_segment([head, pos2(x0, strip.max.y)], Stroke::new(if lit { 1.5 } else { 1.0 }, col));
+        note_tabs::badge(&p, head, n.id, col, r);
+        let hit = Rect::from_center_size(pos2(x0, strip.center().y), vec2(2.0 * r + 4.0, strip.height().max(10.0)));
         let resp = ui.interact(hit, egui::Id::unique(("merlin-ruler-note", n.id)), Sense::click());
         app.auto.add(&format!("merlin.ruler.note.{}", n.id), hit, &n.text);
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            hovered = Some(n.id);
         }
-        let tip = if n.text.trim().is_empty() { crate::i18n::tr("Merlin note (empty)").to_string() } else { n.text.trim().to_string() };
+        let first = n.text.lines().find(|l| !l.trim().is_empty()).map(str::trim).unwrap_or("");
+        let tip = if first.is_empty() { tr_args("Note {} (empty)", &[&n.id]) } else { format!("{} · {first}", n.id) };
         if resp.on_hover_text(tip).clicked() {
             clicked = Some(n.id);
         }
     }
+    if hovered.is_some() {
+        app.ui.merlin.rt.hover_next = hovered;
+    }
     if stretching.is_some() {
-        ui.ctx().request_repaint();
+        super::view::tick(ui.ctx());
     }
     if let Some(id) = clicked {
         open(app, id);

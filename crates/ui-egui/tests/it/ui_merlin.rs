@@ -931,3 +931,90 @@ fn a_long_chat_lays_out_only_what_is_in_view() {
     // Still at the bottom: the last reply is the one showing.
     assert!(h.state().auto.find("merlin.log").is_some());
 }
+
+/// The notes for the next message run down from the top, the composer takes a quarter of the panel
+/// and the model sits in its bottom bar.
+#[test]
+fn notes_sit_on_top_and_the_composer_takes_a_quarter() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.run_steps(1);
+    h.event(egui::Event::Text("@".into()));
+    h.run_steps(4);
+    let id = h.state().ui.merlin.notes[0].id;
+    let rect = |h: &Harness<'_, EffectcraftApp>, id: &str| h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}")).rect;
+    let (tab, log, input, model) = (rect(&h, &format!("merlin.note.{id}")), rect(&h, "merlin.log"), rect(&h, "merlin.input"), rect(&h, "merlin.model"));
+    assert!(tab[1] < log[1], "the note stack is above the conversation");
+    assert!(model[1] > input[1], "the model is in the composer's bottom bar");
+    // The panel runs from the header (its Settings button) to below the model pill.
+    let panel_top = rect(&h, "merlin.settings")[1] - 6.0;
+    let panel_bottom = model[1] + model[3] + 10.0;
+    let composer = panel_bottom - (log[1] + log[3]);
+    assert!(composer >= 0.24 * (panel_bottom - panel_top), "the composer takes a quarter: {composer} of {}", panel_bottom - panel_top);
+}
+
+/// While a note is stretched, its frames render once the playhead rests, before it is opened.
+#[test]
+fn a_stretched_note_renders_its_end_frame_before_enter() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let mut h = harness();
+    board(&mut h);
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    h.run_steps(1);
+    h.event(egui::Event::Text("@".into()));
+    h.run_steps(2);
+    let id = h.state().ui.merlin.notes[0].id;
+    for _ in 0..3 {
+        key(&mut h, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+    }
+    let key_end = format!("note-snap-end:{id}");
+    for _ in 0..200 {
+        if h.state().ui.merlin.has_frame(&key_end) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    assert!(h.state().ui.merlin.has_frame(&key_end), "the end frame is ready");
+    assert!(h.state().ui.merlin.open_notes.is_empty(), "still stretching");
+}
+
+/// A picture of the panel with notes on top and the ruler's numbered pins
+/// (`cargo test -p effectcraft-ui-egui --test it merlin_notes_snapshot -- --ignored`).
+#[test]
+#[ignore]
+fn merlin_notes_snapshot() {
+    use effectcraft_engine::time::Tick;
+    use effectcraft_ui_egui::dock::PanelKind;
+    let mut h = harness();
+    board(&mut h);
+    let add = |h: &mut Harness<'_, EffectcraftApp>, at: f64, frames: usize, text: &str| {
+        h.state_mut().session.set_time(Tick::from_seconds_f64(at));
+        h.state_mut().ui.focused = PanelKind::Timeline;
+        h.run_steps(1);
+        h.event(egui::Event::Text("@".into()));
+        h.run_steps(2);
+        for _ in 0..frames {
+            key(h, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        }
+        key(h, egui::Key::Enter, egui::Modifiers::NONE);
+        let id = h.state().ui.merlin.notes.last().unwrap().id;
+        h.state_mut().ui.merlin.notes.last_mut().unwrap().text = text.into();
+        h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique(("merlin-note-text", id))));
+        id
+    };
+    let a = add(&mut h, 0.5, 0, "Make the title pop in with a bounce");
+    let b = add(&mut h, 1.5, 20, "Flash white here instead of orange");
+    h.state_mut().ui.merlin.open_notes.remove(&a);
+    h.state_mut().ui.merlin.open_notes.insert(b);
+    h.state_mut().ui.focused = PanelKind::Timeline;
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/merlin-notes.png");
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).unwrap();
+    h.render().expect("render").save(out).unwrap();
+}

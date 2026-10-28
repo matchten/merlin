@@ -25,6 +25,8 @@ pub(super) const CHIPS_H: f32 = 28.0;
 const APPEAR_SECS: f64 = 0.28;
 /// How long the empty conversation's mark bobs before it rests.
 const EMPTY_BOB_SECS: f64 = 3.0;
+/// The share of the panel's height the composer takes.
+const COMPOSER_SHARE: f32 = 0.25;
 /// Body text size.
 const BODY: f32 = 13.0;
 
@@ -88,12 +90,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), 38.0));
     let chips = if app.ui.merlin.attachments.is_empty() { 0.0 } else { app.ui.merlin.rt.chips_h.max(CHIPS_H) + 2.0 };
     let pins = if app.ui.merlin.pins.is_empty() { 0.0 } else { app.ui.merlin.rt.pins_h.max(super::mentions::PIN_H) + 4.0 };
-    let footer_h = (148.0 + chips + pins).min(rect.height() * 0.6);
+    // The composer takes a quarter of the panel (more when chips need it); the notes for the next
+    // message run down from the top, the conversation fills between.
+    let footer_h = (rect.height() * COMPOSER_SHARE).max(148.0 + chips + pins).min(rect.height() * 0.6);
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
     let middle = Rect::from_min_max(pos2(rect.min.x, header.max.y), pos2(rect.max.x, footer.min.y));
-    let stack_h = super::note_tabs::stack_height(app, middle.height());
-    let body = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.max.y - stack_h));
-    let stack = Rect::from_min_max(pos2(rect.min.x, body.max.y), middle.max);
+    let stack_h = super::note_tabs::stack_height(app, rect.height());
+    let stack = Rect::from_min_max(middle.min, pos2(rect.max.x, middle.min.y + stack_h));
+    let body = Rect::from_min_max(pos2(rect.min.x, stack.max.y), middle.max);
     let mut acts = vec![];
     header_ui(app, ui, header, &look, now, &mut acts);
     if app.ui.merlin.settings_open {
@@ -349,37 +353,7 @@ fn header_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, 
         right = new_chat.min.x - 6.0;
     }
 
-    let cfg = app.ui.merlin.settings.config();
-    let left = name.max.x + 10.0;
-    let max_w = (right - left).max(0.0);
-    if max_w > 40.0 {
-        let text = format!("{} · {}", cfg.provider.label(), cfg.model());
-        let mut job = LayoutJob::simple_singleline(text, Tokens::ui(11.5), t.text_dim);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(max_w - 30.0);
-        let galley = ui.painter().layout_job(job);
-        let pill_r = Rect::from_min_size(pos2(left, cy - 11.0), vec2(galley.size().x + 30.0, 22.0));
-        let resp = ui.interact(pill_r, egui::Id::unique("merlin-model-pill"), Sense::click());
-        let hot = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
-        p.rect_filled(pill_r, 11.0, lerp(look.card, t.hover, hot));
-        p.rect_stroke(pill_r, 11.0, Stroke::new(1.0, look.border), StrokeKind::Inside);
-        p.galley(pos2(pill_r.min.x + 10.0, cy - galley.size().y / 2.0), galley, t.text_dim);
-        icons::paint(&p, Rect::from_center_size(pos2(pill_r.max.x - 12.0, cy), vec2(10.0, 10.0)), Icon::ChevronDown, t.text_faint);
-        app.auto.add("merlin.model", pill_r, "Provider and model");
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let (tin, tout, cost) = native::chat_cost(&app.ui.merlin);
-        let mut tip = tr("Change the provider or model").to_string();
-        if tin + tout > 0 {
-            tip.push_str(&format!("\n{}", tr_args("This chat: {} in · {} out", &[&tokens(tin), &tokens(tout)])));
-            if let Some(c) = cost {
-                tip.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
-            }
-        }
-        if resp.on_hover_text(tip).clicked() {
-            acts.push(Act::ToggleSettings);
-        }
-    }
+    let _ = (name, right);
 }
 
 // ------------------------------------------------------------------ conversation
@@ -606,6 +580,7 @@ fn disclosure(ui: &mut egui::Ui, open: bool, look: &Look, label: impl FnOnce(&mu
 fn empty_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, now: f64, acts: &mut Vec<Act>) {
     let t = look.t;
     let mut c = child(ui, r.shrink2(vec2(18.0, 12.0)));
+    c.set_clip_rect(r.intersect(ui.clip_rect()));
     c.add_space((r.height() * 0.16).max(8.0));
     c.vertical_centered(|ui| {
         let (mr, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
@@ -636,6 +611,10 @@ fn empty_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look, n
     let width = c.available_width().min(340.0);
     let x = c.max_rect().center().x - width / 2.0;
     for (n, s) in SUGGESTIONS.iter().enumerate() {
+        // Only the suggestions that fit (the notes and the composer take room in a short panel).
+        if c.cursor().min.y + 30.0 > r.max.y - 4.0 {
+            break;
+        }
         let (row, _) = c.allocate_exact_size(vec2(c.available_width(), 32.0), Sense::hover());
         let r = Rect::from_min_size(pos2(x, row.min.y), vec2(width, 30.0));
         let resp = c.interact(r, egui::Id::unique(("merlin-suggest", n)), Sense::click());
@@ -1195,7 +1174,7 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
         .frame(egui::Frame::NONE)
         .font(Tokens::ui(BODY))
         .desired_width(text_r.width())
-        .desired_rows(2)
+        .desired_rows(((text_r.height() / 17.0).floor() as usize).max(2))
         .hint_text(RichText::new(tr("Ask Merlin… type @ to pin a layer or time")).color(t.text_faint));
     let resp = c.add(te);
     app.auto.add_response("merlin.input", &resp, "Message Merlin");
@@ -1236,11 +1215,12 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
             acts.push(Act::SetMode(m));
         }
     }
-    // A hint, when it fits before the send button.
+    // The model, then a hint when it fits before the send button.
+    let model_r = model_pill(app, ui, pos2(seg.max.x + 6.0, bar.center().y), bar.max.x - 34.0 - seg.max.x - 6.0, look, acts);
     let hint = if mode == Mode::Plan { tr("Merlin plans; nothing is built yet") } else { tr("Enter to send · Shift+Enter for a new line") };
     let g = ui.painter().layout_no_wrap(hint.to_string(), Tokens::ui(10.5), t.text_faint);
-    if seg.max.x + 8.0 + g.size().x < bar.max.x - 34.0 {
-        ui.painter().galley(pos2(seg.max.x + 8.0, bar.center().y - g.size().y / 2.0), g, t.text_faint);
+    if model_r.max.x + 8.0 + g.size().x < bar.max.x - 34.0 {
+        ui.painter().galley(pos2(model_r.max.x + 8.0, bar.center().y - g.size().y / 2.0), g, t.text_faint);
     }
     let send = Rect::from_center_size(pos2(bar.max.x - 14.0, bar.center().y), vec2(26.0, 26.0));
     let enabled = busy || native::can_send(app);
@@ -1271,6 +1251,45 @@ fn composer_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look: &Look
     if sresp.on_hover_text(if busy { tr("Stop") } else { tr("Send") }).clicked() {
         acts.push(if busy { Act::Stop } else { Act::Send });
     }
+}
+
+/// The model in use as a quiet pill starting at `left_center` (at most `max_w` wide); a click opens
+/// Settings. Returns its rect (empty when it doesn't fit).
+fn model_pill(app: &mut EffectcraftApp, ui: &mut egui::Ui, left_center: egui::Pos2, max_w: f32, look: &Look, acts: &mut Vec<Act>) -> Rect {
+    let t = look.t;
+    let cy = left_center.y;
+    if max_w < 50.0 {
+        return Rect::from_min_size(left_center, Vec2::ZERO);
+    }
+    let cfg = app.ui.merlin.settings.config();
+    let mut job = LayoutJob::simple_singleline(cfg.model().to_string(), Tokens::ui(11.0), t.text_dim);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((max_w - 26.0).min(150.0));
+    let galley = ui.painter().layout_job(job);
+    let r = Rect::from_min_size(pos2(left_center.x, cy - 11.0), vec2(galley.size().x + 26.0, 22.0));
+    let resp = ui.interact(r, egui::Id::unique("merlin-model-pill"), Sense::click());
+    let hot = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let p = ui.painter();
+    if hot > 0.0 {
+        p.rect_filled(r, 11.0, t.hover.gamma_multiply(hot));
+    }
+    p.galley(pos2(r.min.x + 9.0, cy - galley.size().y / 2.0), galley, lerp(t.text_dim, t.text, hot));
+    icons::paint(p, Rect::from_center_size(pos2(r.max.x - 10.0, cy), vec2(9.0, 9.0)), Icon::ChevronDown, t.text_faint);
+    app.auto.add("merlin.model", r, "Provider and model");
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let (tin, tout, cost) = native::chat_cost(&app.ui.merlin);
+    let mut tip = format!("{} · {}\n{}", cfg.provider.label(), cfg.model(), tr("Change the provider or model"));
+    if tin + tout > 0 {
+        tip.push_str(&format!("\n{}", tr_args("This chat: {} in · {} out", &[&tokens(tin), &tokens(tout)])));
+        if let Some(c) = cost {
+            tip.push_str(&format!(" · ≈ {}", merlin_agent::pricing::format(c)));
+        }
+    }
+    if resp.on_hover_text(tip).clicked() {
+        acts.push(Act::ToggleSettings);
+    }
+    r
 }
 
 /// The active comp, selected layers and time, as small chips; clicking the layers or the time pins

@@ -136,10 +136,15 @@ pub(crate) struct Runtime {
     pub(super) now: f64,
     /// The note being stretched on the Timeline: its id, where it started, the playhead last frame.
     pub(super) stretching: Option<(u64, Tick, Tick)>,
+    /// When the playhead last moved while stretching.
+    pub(super) stretch_moved: f64,
     /// Note snapshots rendering.
     pub(super) snap_jobs: Vec<super::frames::SnapJob>,
     /// The time each note snapshot shows, by (note, 0 start / 1 end).
     pub(super) snap_at: HashMap<(u64, usize), Tick>,
+    /// The note under the pointer (on its tab or the ruler) last frame, and this frame so far.
+    pub(super) hover_note: Option<u64>,
+    pub(super) hover_next: Option<u64>,
     /// The note stack's height last frame.
     pub(super) stack_h: f32,
     /// The frame shown while marking a note's area, its render, and the box being dragged (comp px).
@@ -1049,6 +1054,8 @@ fn enforce(app: &mut EffectcraftApp, scope: &Scope, cp: &Checkpoint, reply: Valu
 /// take in their progress.
 pub fn tick(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     ensure_loaded(app);
+    let rt = &mut app.ui.merlin.rt;
+    rt.hover_note = rt.hover_next.take();
     take_attachments(app, ctx);
     super::frames::take_snapshots(app, ctx);
     sync_chat(app, now);
@@ -1448,5 +1455,10 @@ impl super::MerlinPanel {
     /// How many conversation items were laid out last frame (the rest were scrolled out of view).
     pub fn drawn_items(&self) -> usize {
         self.rt.drawn_items
+    }
+
+    /// Whether an image is kept under `key` (`note-snap-end:3`, `turn-after:1`).
+    pub fn has_frame(&self, key: &str) -> bool {
+        self.rt.frames.contains_key(key)
     }
 }

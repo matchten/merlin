@@ -18,20 +18,57 @@ use crate::i18n::{tr, tr_args};
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 
-/// Amber: the user's notes (on tabs and the Timeline ruler).
+/// Amber: the first note's colour, and the marked area's.
 pub(super) const AMBER: Color32 = Color32::from_rgb(0xff, 0xb8, 0x00);
 /// Green: notes Merlin addressed.
 const DONE: Color32 = Color32::from_rgb(0x4a, 0xde, 0x80);
+/// Each note's colour, by its number (violet stays Merlin's own).
+const HUES: [Color32; 6] = [
+    AMBER,
+    Color32::from_rgb(0x38, 0xbd, 0xf8),
+    Color32::from_rgb(0xf4, 0x72, 0xb6),
+    Color32::from_rgb(0xa3, 0xe6, 0x35),
+    Color32::from_rgb(0xfb, 0x92, 0x3c),
+    Color32::from_rgb(0x2d, 0xd4, 0xbf),
+];
 /// The stack takes at most this share of the panel's height before it scrolls.
-const STACK_SHARE: f32 = 0.42;
+const STACK_SHARE: f32 = 0.4;
+/// The widest a note's frame is shown.
+const PIC_W: f32 = 112.0;
 
-/// A note's colour.
+/// Note `id`'s colour: the same on its tab and on the Timeline's ruler.
+pub(super) fn hue(id: u64) -> Color32 {
+    HUES.get((id.saturating_sub(1) % HUES.len() as u64) as usize).copied().unwrap_or(AMBER)
+}
+
+/// A note's colour: its own, or Merlin's for a plan beat.
 pub(super) fn color(n: &Note, look: &Look) -> Color32 {
-    match (&n.status, n.author) {
-        (NoteStatus::Addressed { .. }, _) => DONE,
-        (NoteStatus::WontFix { .. }, _) => look.t.text_faint,
-        (_, Author::Merlin) => look.magic,
-        (_, Author::User) => AMBER,
+    if n.author == Author::Merlin { look.magic } else { hue(n.id) }
+}
+
+/// A note's number in a filled circle centred on `c`.
+pub(super) fn badge(p: &egui::Painter, c: Pos2, id: u64, col: Color32, radius: f32) {
+    p.circle_filled(c, radius, col);
+    let text = if id > 99 { "·".to_string() } else { id.to_string() };
+    p.text(c, Align2::CENTER_CENTER, text, Tokens::semibold(radius * 1.15), Color32::from_rgb(0x1a, 0x1a, 0x1a));
+}
+
+/// A timecode without its leading zero hours and minutes: `0:00:02:27` → `2:27`, `0:01:04:03` →
+/// `1:04:03`. Other time displays (frames, feet) are left as they are.
+pub(super) fn short_time(s: &str) -> String {
+    let parts: Vec<&str> = s.split([':', ';']).collect();
+    if parts.len() != 4 || !parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+        return s.to_string();
+    }
+    let sep = if s.contains(';') { ";" } else { ":" };
+    let num = |p: &str| p.parse::<u64>().unwrap_or(0);
+    let (h, m, sec, f) = (parts[0], parts[1], parts[2], parts[3]);
+    if num(h) > 0 {
+        format!("{}:{m}:{sec}{sep}{f}", num(h))
+    } else if num(m) > 0 {
+        format!("{}:{sec}{sep}{f}", num(m))
+    } else {
+        format!("{}{sep}{f}", num(sec))
     }
 }
 
@@ -43,6 +80,14 @@ pub(super) fn label(s: &Session, n: &Note) -> String {
     if b > a { format!("@{}–{}", at(a), at(b)) } else { format!("@{}", at(a)) }
 }
 
+/// The tab's time: `1:12`, or `1:00–2:12` for a range.
+pub(super) fn short_label(s: &Session, n: &Note) -> String {
+    let Some(comp) = s.project.comp(ItemId(n.comp)) else { return format!("{:.2}s", n.start.seconds()) };
+    let (a, b) = n.span();
+    let at = |t: Tick| short_time(&crate::panels::timecode(s, comp, t));
+    if b > a { format!("{}–{}", at(a), at(b)) } else { at(a) }
+}
+
 /// What a note is about: its layers and properties.
 fn about(s: &Session, n: &Note) -> String {
     let comp = s.project.comp(ItemId(n.comp));
@@ -51,12 +96,12 @@ fn about(s: &Session, n: &Note) -> String {
     parts.join(", ")
 }
 
-fn status_text(s: &NoteStatus) -> Option<&'static str> {
+fn status_text(s: &NoteStatus) -> Option<(&'static str, Option<Color32>)> {
     match s {
         NoteStatus::Open | NoteStatus::Proposed => None,
-        NoteStatus::Sent => Some("With Merlin…"),
-        NoteStatus::Addressed { .. } => Some("Addressed"),
-        NoteStatus::WontFix { .. } => Some("Won't fix"),
+        NoteStatus::Sent => Some(("With Merlin…", None)),
+        NoteStatus::Addressed { .. } => Some(("✓ Addressed", Some(DONE))),
+        NoteStatus::WontFix { .. } => Some(("Won't fix", None)),
     }
 }
 
@@ -95,15 +140,15 @@ pub(super) fn tab(
     acts: &mut Vec<NoteAct>,
 ) {
     let t = look.t;
-    let ctx = ui.ctx().clone();
     let id = note.id;
     let stretching = rt.stretching.is_some_and(|s| s.0 == id);
+    let hovered = rt.hover_note == Some(id);
     let col = color(note, look);
-    let label = label(session, note);
+    let label = short_label(session, note);
     let glow = if stretching { 0.55 + 0.45 * (0.5 + 0.5 * (now * 5.0).sin()) as f32 } else { 0.0 };
     let border = if stretching {
         lerp(look.border, col, glow)
-    } else if open {
+    } else if open || hovered {
         col.gamma_multiply(0.7)
     } else {
         look.border
@@ -114,21 +159,24 @@ pub(super) fn tab(
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(8, 5));
     if stretching {
-        ctx.request_repaint();
+        super::view::tick(ui.ctx());
     }
-    frame.show(ui, |ui| {
+    let shown = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         // The title row toggles the tab (its buttons stay on top).
         let row = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
             ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 16.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.5, col);
-                ui.label(RichText::new(&label).font(Tokens::semibold(11.5)).color(t.text));
+                let (dot, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                let faded = matches!(note.status, NoteStatus::WontFix { .. });
+                badge(ui.painter(), dot.center(), id, if faded { col.gamma_multiply(0.4) } else { col }, 7.5);
+                // Plain labels, so a click anywhere on the row toggles the tab.
+                let quiet = |ui: &mut egui::Ui, text: RichText| ui.add(egui::Label::new(text).selectable(false));
+                quiet(ui, RichText::new(&label).font(Tokens::semibold(11.5)).color(t.text));
                 if note.author == Author::Merlin {
-                    ui.label(RichText::new(tr("Beat")).font(Tokens::ui(10.5)).color(look.magic));
+                    quiet(ui, RichText::new(tr("Beat")).font(Tokens::ui(10.5)).color(look.magic));
                 }
-                if let Some(s) = status_text(&note.status) {
-                    ui.label(RichText::new(tr(s)).font(Tokens::ui(10.5)).color(t.text_faint));
+                if let Some((s, c)) = status_text(&note.status) {
+                    quiet(ui, RichText::new(tr(s)).font(Tokens::ui(10.5)).color(c.unwrap_or(t.text_faint)));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (chev, _) = ui.allocate_exact_size(vec2(14.0, 16.0), Sense::hover());
@@ -147,7 +195,7 @@ pub(super) fn tab(
                         } else {
                             (short(first, 60), t.text_dim)
                         };
-                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(11.5)).color(c)).truncate());
+                        ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(11.5)).color(c)).truncate().selectable(false));
                     }
                 });
             });
@@ -161,6 +209,7 @@ pub(super) fn tab(
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        let resp = resp.on_hover_text(label_tip(session, note));
         if resp.clicked() {
             acts.push(NoteAct::Toggle(id));
         }
@@ -168,116 +217,175 @@ pub(super) fn tab(
             return;
         }
         ui.add_space(4.0);
-        // The frame(s): as written, or before / after once Merlin answered.
-        let done = note.status.is_done();
-        let [snap, snap_end] = frames::snap_keys(id);
-        let pics: Vec<(String, String)> = if done && rt.frames.contains_key(&format!("note-after:{id}")) {
-            vec![(format!("note-before:{id}"), tr("Before").to_string()), (format!("note-after:{id}"), tr("After").to_string())]
-        } else if note.end.is_some() {
-            vec![(snap, tr("Start").to_string()), (snap_end, tr("End").to_string())]
-        } else {
-            vec![(snap, String::new())]
-        };
+        // The frame(s) small on the left with the note beside them, or above it when narrow.
+        let pics = pictures(rt, note);
         let n = pics.len() as f32;
-        let w = ((ui.available_width() - 6.0 * (n - 1.0)) / n).max(40.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            for (key, cap) in &pics {
+        let pics_w = (PIC_W * n + 6.0 * (n - 1.0)).min(ui.available_width());
+        if ui.available_width() - pics_w >= 170.0 {
+            ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
-                    let tex = textures(&ctx, rt, key).first().cloned();
-                    let size = match &tex {
-                        Some(tx) => {
-                            let [tw, th] = tx.size();
-                            vec2(w, w * th.max(1) as f32 / tw.max(1) as f32)
-                        }
-                        None => vec2(w, w * 9.0 / 16.0),
-                    };
-                    let (r, resp) = ui.allocate_exact_size(size, if mode == Mode::Edit { Sense::click() } else { Sense::hover() });
-                    match &tex {
-                        Some(tx) => {
-                            egui::Image::from_texture(egui::load::SizedTexture::new(tx.id(), size)).corner_radius(5.0).paint_at(ui, r);
-                        }
-                        None => {
-                            ui.painter().rect_filled(r, 5.0, t.app_bg);
-                            if frames::snapshot_pending(rt, id) || super::view::decoding(rt, key) {
-                                super::view::spinner(ui, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), look.magic);
-                            }
-                        }
-                    }
-                    if let (Some([x, y, rw, rh]), Some(comp)) = (note.region, session.project.comp(ItemId(note.comp))) {
-                        let s = r.width() / comp.width.max(1) as f32;
-                        let b = Rect::from_min_size(pos2(r.min.x + x * s, r.min.y + y * s), vec2(rw * s, rh * s)).intersect(r);
-                        ui.painter().rect_stroke(b, 2.0, Stroke::new(1.5, AMBER), StrokeKind::Inside);
-                    }
-                    if mode == Mode::Edit {
-                        auto.add(&format!("merlin.note.{id}.mark"), r, "Mark an area of the frame");
-                        if resp.on_hover_text(tr("Click to mark the part of the frame this note is about")).clicked() {
-                            acts.push(NoteAct::Mark(id));
-                        }
-                    }
-                    if !cap.is_empty() {
-                        ui.label(RichText::new(cap).font(Tokens::ui(10.0)).color(t.text_faint));
-                    }
+                    ui.set_width(pics_w);
+                    pictures_ui(ui, session, rt, auto, look, note, mode, &pics, pics_w, acts);
                 });
-            }
-        });
-        ui.add_space(2.0);
-        match mode {
-            Mode::Edit => {
-                let te = egui::TextEdit::multiline(&mut note.text)
-                    .id(egui::Id::unique(("merlin-note-text", id)))
-                    .font(Tokens::ui(12.5))
-                    .desired_rows(2)
-                    .desired_width(ui.available_width())
-                    .hint_text(RichText::new(tr("What should this moment look like?")).color(t.text_faint));
-                let resp = ui.add(te);
-                auto.add_response(&format!("merlin.note.{id}.text"), &resp, "Note text");
-                if resp.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-                    acts.push(NoteAct::Close(id));
-                }
-                if rt.focus_note == Some(id) {
-                    resp.request_focus();
-                    resp.scroll_to_me(Some(egui::Align::Center));
-                    rt.focus_note = None;
-                }
-            }
-            Mode::Read => {
-                if !note.text.trim().is_empty() {
-                    ui.add(egui::Label::new(RichText::new(note.text.trim()).font(Tokens::ui(12.5)).color(t.text)).wrap());
-                }
-                if let NoteStatus::Addressed { summary } | NoteStatus::WontFix { summary } = &note.status
-                    && !summary.is_empty()
-                {
-                    ui.add(egui::Label::new(RichText::new(format!("✦ {summary}")).font(Tokens::ui(11.5)).color(look.magic)).wrap());
-                }
-            }
+                ui.vertical(|ui| text_ui(ui, session, rt, auto, look, note, mode, acts));
+            });
+        } else {
+            pictures_ui(ui, session, rt, auto, look, note, mode, &pics, pics_w, acts);
+            text_ui(ui, session, rt, auto, look, note, mode, acts);
         }
-        let about = about(session, note);
-        let mut bits = vec![];
-        if !about.is_empty() {
-            bits.push(tr_args("About {}", &[&about]));
-        }
-        if note.region.is_some() {
-            bits.push(tr("Area marked").to_string());
-        }
-        if !bits.is_empty() {
-            ui.label(RichText::new(bits.join(" · ")).font(Tokens::ui(10.5)).color(t.text_faint));
-        }
-        if mode == Mode::Edit {
-            ui.horizontal(|ui| {
-                let s = pill(ui, tr("Start at playhead"), false, true, look, &format!("note-start-{id}"));
-                auto.add(&format!("merlin.note.{id}.start"), s.rect, "Start at playhead");
-                if s.clicked() {
-                    acts.push(NoteAct::StartHere(id));
+    });
+    if shown.response.hovered() || shown.response.contains_pointer() {
+        rt.hover_next = Some(id);
+    }
+}
+
+/// The tab's tooltip: the full time.
+fn label_tip(s: &Session, n: &Note) -> String {
+    let what = about(s, n);
+    if what.is_empty() { label(s, n) } else { format!("{}\n{}", label(s, n), what) }
+}
+
+/// The frames a note shows: as written, or before / after once Merlin answered (key, caption).
+fn pictures(rt: &Runtime, note: &Note) -> Vec<(String, String)> {
+    let id = note.id;
+    let [snap, snap_end] = frames::snap_keys(id);
+    if note.status.is_done() && rt.frames.contains_key(&format!("note-after:{id}")) {
+        vec![(format!("note-before:{id}"), tr("Before").to_string()), (format!("note-after:{id}"), tr("After").to_string())]
+    } else if note.end.is_some() {
+        vec![(snap, tr("Start").to_string()), (snap_end, tr("End").to_string())]
+    } else {
+        vec![(snap, String::new())]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pictures_ui(
+    ui: &mut egui::Ui,
+    session: &Session,
+    rt: &mut Runtime,
+    auto: &mut crate::automation::Registry,
+    look: &Look,
+    note: &Note,
+    mode: Mode,
+    pics: &[(String, String)],
+    width: f32,
+    acts: &mut Vec<NoteAct>,
+) {
+    let t = look.t;
+    let ctx = ui.ctx().clone();
+    let id = note.id;
+    let n = pics.len().max(1) as f32;
+    let w = ((width - 6.0 * (n - 1.0)) / n).clamp(30.0, PIC_W);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (key, cap) in pics {
+            ui.vertical(|ui| {
+                let tex = textures(&ctx, rt, key).first().cloned();
+                let aspect = match (&tex, session.project.comp(ItemId(note.comp))) {
+                    (Some(tx), _) => tx.size()[1].max(1) as f32 / tx.size()[0].max(1) as f32,
+                    (None, Some(c)) => c.height.max(1) as f32 / c.width.max(1) as f32,
+                    (None, None) => 9.0 / 16.0,
+                };
+                let size = vec2(w, w * aspect);
+                let (r, resp) = ui.allocate_exact_size(size, if mode == Mode::Edit { Sense::click() } else { Sense::hover() });
+                match &tex {
+                    Some(tx) => {
+                        egui::Image::from_texture(egui::load::SizedTexture::new(tx.id(), size)).corner_radius(4.0).paint_at(ui, r);
+                    }
+                    None => {
+                        ui.painter().rect_filled(r, 4.0, t.app_bg);
+                        if frames::snapshot_pending(rt, id) || super::view::decoding(rt, key) {
+                            super::view::spinner(ui, Rect::from_center_size(r.center(), vec2(12.0, 12.0)), look.magic);
+                        }
+                    }
                 }
-                let e = pill(ui, tr("End at playhead"), false, true, look, &format!("note-end-{id}"));
-                auto.add(&format!("merlin.note.{id}.end"), e.rect, "End at playhead");
-                if e.clicked() {
-                    acts.push(NoteAct::EndHere(id));
+                if let (Some([x, y, rw, rh]), Some(comp)) = (note.region, session.project.comp(ItemId(note.comp))) {
+                    let s = r.width() / comp.width.max(1) as f32;
+                    let b = Rect::from_min_size(pos2(r.min.x + x * s, r.min.y + y * s), vec2(rw * s, rh * s)).intersect(r);
+                    ui.painter().rect_stroke(b, 2.0, Stroke::new(1.5, AMBER), StrokeKind::Inside);
+                }
+                if mode == Mode::Edit {
+                    auto.add(&format!("merlin.note.{id}.mark"), r, "Mark an area of the frame");
+                    if resp.on_hover_text(tr("Click to mark the part of the frame this note is about")).clicked() {
+                        acts.push(NoteAct::Mark(id));
+                    }
+                }
+                if !cap.is_empty() {
+                    ui.label(RichText::new(cap).font(Tokens::ui(10.0)).color(t.text_faint));
                 }
             });
         }
     });
+}
+
+/// The note's text (editable or read), what it's about, and its retime links.
+#[allow(clippy::too_many_arguments)]
+fn text_ui(
+    ui: &mut egui::Ui,
+    session: &Session,
+    rt: &mut Runtime,
+    auto: &mut crate::automation::Registry,
+    look: &Look,
+    note: &mut Note,
+    mode: Mode,
+    acts: &mut Vec<NoteAct>,
+) {
+    let t = look.t;
+    let id = note.id;
+    match mode {
+        Mode::Edit => {
+            let te = egui::TextEdit::multiline(&mut note.text)
+                .id(egui::Id::unique(("merlin-note-text", id)))
+                .font(Tokens::ui(12.5))
+                .desired_rows(2)
+                .desired_width(ui.available_width())
+                .hint_text(RichText::new(tr("What should this moment look like?")).color(t.text_faint));
+            let resp = ui.add(te);
+            auto.add_response(&format!("merlin.note.{id}.text"), &resp, "Note text");
+            if resp.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                acts.push(NoteAct::Close(id));
+            }
+            if rt.focus_note == Some(id) {
+                resp.request_focus();
+                resp.scroll_to_me(Some(egui::Align::Center));
+                rt.focus_note = None;
+            }
+        }
+        Mode::Read => {
+            if !note.text.trim().is_empty() {
+                ui.add(egui::Label::new(RichText::new(note.text.trim()).font(Tokens::ui(12.5)).color(t.text)).wrap());
+            }
+            if let NoteStatus::Addressed { summary } | NoteStatus::WontFix { summary } = &note.status
+                && !summary.is_empty()
+            {
+                ui.add(egui::Label::new(RichText::new(format!("✦ {summary}")).font(Tokens::ui(11.5)).color(look.magic)).wrap());
+            }
+        }
+    }
+    let about = about(session, note);
+    let mut bits = vec![];
+    if !about.is_empty() {
+        bits.push(tr_args("About {}", &[&about]));
+    }
+    if note.region.is_some() {
+        bits.push(tr("Area marked").to_string());
+    }
+    if !bits.is_empty() {
+        ui.add(egui::Label::new(RichText::new(bits.join(" · ")).font(Tokens::ui(10.5)).color(t.text_faint)).wrap());
+    }
+    if mode == Mode::Edit {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for (text, key, act) in [(tr("Start here"), "start", NoteAct::StartHere(id)), (tr("End here"), "end", NoteAct::EndHere(id))] {
+                let r = ui.add(egui::Label::new(RichText::new(text).font(Tokens::ui(11.0)).color(look.magic)).sense(Sense::click()));
+                auto.add(&format!("merlin.note.{id}.{key}"), r.rect, text);
+                let tip = if key == "start" { tr("Start this note at the playhead") } else { tr("End this note at the playhead") };
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+                    acts.push(act);
+                }
+            }
+        });
+    }
 }
 
 /// Apply the tabs' clicks.
@@ -321,7 +429,7 @@ pub(super) fn apply(app: &mut EffectcraftApp, acts: Vec<NoteAct>) {
     }
 }
 
-/// The stack's height for a panel whose middle is `avail` tall (0 without open notes).
+/// The stack's height in a panel `avail` tall (0 without open notes).
 pub(super) fn stack_height(app: &EffectcraftApp, avail: f32) -> f32 {
     if !app.ui.merlin.notes.iter().any(|n| n.status == NoteStatus::Open) {
         return 0.0;
@@ -335,7 +443,7 @@ pub(super) fn stack_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, loo
     if r.height() < 4.0 {
         return;
     }
-    ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.separator));
+    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, t.separator));
     let ids: Vec<u64> = app.ui.merlin.notes.iter().filter(|n| n.status == NoteStatus::Open).map(|n| n.id).collect();
     let inner = r.shrink2(vec2(10.0, 4.0));
     // Header: count and collapse-all.
@@ -373,7 +481,7 @@ pub(super) fn stack_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, loo
     });
     // Sized to its content next frame (up to its share of the panel).
     let want = out.content_size.y + 30.0;
-    if (want - panel.rt.stack_h).abs() > 0.5 {
+    if (want - panel.rt.stack_h).abs() > 2.0 {
         panel.rt.stack_h = want;
         ui.ctx().request_repaint();
     }
@@ -490,5 +598,32 @@ pub(super) fn mark_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, look
     if done || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.ui.merlin.marking_note = None;
         app.ui.merlin.rt.mark_drag = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_times_drop_leading_zero_hours_and_minutes() {
+        assert_eq!(short_time("0:00:02:27"), "2:27");
+        assert_eq!(short_time("0:00:00:05"), "0:05");
+        assert_eq!(short_time("0:01:04:03"), "1:04:03");
+        assert_eq!(short_time("1:02:03:04"), "1:02:03:04");
+        assert_eq!(short_time("0:00:02;27"), "2;27");
+        // Frames and feet displays stay as they are.
+        assert_eq!(short_time("00146"), "00146");
+        assert_eq!(short_time("12+08"), "12+08");
+    }
+
+    #[test]
+    fn the_first_notes_have_different_colours() {
+        let hues: Vec<Color32> = (1..=6).map(hue).collect();
+        for (i, a) in hues.iter().enumerate() {
+            assert!(hues.iter().skip(i + 1).all(|b| b != a));
+        }
+        assert_eq!(hue(1), hue(7));
+        assert_eq!(hue(0), hue(1));
     }
 }
